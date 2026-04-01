@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Environment
+.env
+
+# Data (generated)
+data/chroma/
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.sw?
+.DS_Store
+
+# Taskmaster (generated)
+.taskmaster/
+.claude/
+.cursor/
+.gemini/
+.kiro/
+.roo/
+.trae/
+.windsurf/
+.zed/
+.clinerules/
+.roomodes
+.rules
+.mcp.json
+opencode.json
+CLAUDE.md
+AGENT.md
+AGENTS.md
+GEMINI.md
