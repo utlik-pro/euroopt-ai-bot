@@ -1,0 +1,21 @@
+# Render Blueprint — деплой в один клик
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: euroopt-llm-relay
+    runtime: python
+    plan: free  # Бесплатный тариф для MVP
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: RELAY_SECRET
+        generateValue: true
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+    healthCheckPath: /health
+    region: frankfurt  # Ближе к РБ
