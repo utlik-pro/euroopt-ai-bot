@@ -11,7 +11,21 @@ build/
 
 # Data (generated)
 data/chroma/
+data/**/*.docx
+data/**/*.xlsx
 logs/
+reports/
+
+# Docker
+.docker/
+
+# Conversations
+conversation-*.txt
+2026-*.txt
+
+# Приватные данные тестеров (user_id, @username, ФИО руководства Евроторга)
+data/whitelist.json
+data/tester_list.json
 
 # IDE
 .idea/

@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     glm_api_key: str = Field(default="", env="GLM_API_KEY")
     google_api_key: str = Field(default="", env="GOOGLE_API_KEY")
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
+    openrouter_api_key: str = Field(default="", env="OPENROUTER_API_KEY")
+    atlas_api_key: str = Field(default="", env="ATLAS_API_KEY")
     qwen_api_key: str = Field(default="", env="QWEN_API_KEY")
     yandexgpt_api_key: str = Field(default="", env="YANDEXGPT_API_KEY")
     yandexgpt_folder_id: str = Field(default="", env="YANDEXGPT_FOLDER_ID")
@@ -35,7 +37,7 @@ class Settings(BaseSettings):
     # RAG
     chroma_persist_dir: str = Field(default="./data/chroma", env="CHROMA_PERSIST_DIR")
     embedding_model: str = Field(
-        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        default="intfloat/multilingual-e5-base",
         env="EMBEDDING_MODEL",
     )
     rag_top_k: int = Field(default=5, env="RAG_TOP_K")
@@ -43,6 +45,40 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
+
+    # Access control (MVP whitelist + approval flow)
+    whitelist_enabled: bool = Field(default=True, env="WHITELIST_ENABLED")
+    admin_user_ids: str = Field(default="", env="ADMIN_USER_IDS")
+    # @username внутренней команды — автоодобрение при первом контакте (залочится на user_id)
+    pre_approved_usernames: str = Field(default="", env="PRE_APPROVED_USERNAMES")
+    rate_limit_per_hour: int = Field(default=20, env="RATE_LIMIT_PER_HOUR")
+    access_denied_message: str = Field(
+        default="🔒 Доступ к AI-помощнику ограничен. Ваша заявка отклонена.",
+        env="ACCESS_DENIED_MESSAGE",
+    )
+    access_pending_message: str = Field(
+        default=(
+            "🕐 Заявка на доступ принята. Ожидайте подтверждения администратора.\n\n"
+            "Если срочно — напишите @dmitryutlik."
+        ),
+        env="ACCESS_PENDING_MESSAGE",
+    )
+    rate_limit_message: str = Field(
+        default="⏳ Слишком много сообщений. Попробуйте через час.",
+        env="RATE_LIMIT_MESSAGE",
+    )
+    non_private_ignore: bool = Field(default=True, env="NON_PRIVATE_IGNORE")
+
+    def pre_approved_usernames_set(self) -> set[str]:
+        return {u.strip().lstrip("@").lower() for u in self.pre_approved_usernames.split(",") if u.strip()}
+
+    def admin_user_ids_set(self) -> set[int]:
+        result = set()
+        for x in self.admin_user_ids.split(","):
+            x = x.strip()
+            if x.isdigit():
+                result.add(int(x))
+        return result
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -1,11 +1,24 @@
 services:
   bot:
     build: .
+    container_name: euroopt-ai-bot
     restart: unless-stopped
     env_file: .env
     volumes:
       - ./data:/app/data
       - chroma_data:/app/data/chroma
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   chroma_data:

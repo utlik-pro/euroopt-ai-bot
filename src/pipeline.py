@@ -6,6 +6,7 @@ from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
 from src.llm.prompts import SYSTEM_PROMPT
 from src.rag.engine import RAGEngine
 from src.promotions.engine import PromotionEngine
+from src.chat_history import ChatHistory
 from src.monitoring.logger import interaction_logger, RequestLog
 
 logger = structlog.get_logger()
@@ -16,15 +17,14 @@ class Pipeline:
         self.llm = get_llm_provider_with_fallback()
         self.rag = RAGEngine()
         self.promotions = PromotionEngine()
+        self.history = ChatHistory(max_messages=20, ttl_minutes=60)
 
     async def process(self, user_message: str, user_id: int) -> str:
         """Process user message through the 3-layer pipeline.
 
         Layer 1: Content filter (block politics, religion, competitors)
-        Layer 2: RAG search (if query relates to Euroopt)
-        Layer 3: LLM generation
-
-        All interactions are logged for daily reports and analytics.
+        Layer 2: RAG search + history context
+        Layer 3: LLM generation with chat history
         """
         start_time = time.monotonic()
         log = RequestLog(user_id=user_id, user_message=user_message)
@@ -52,11 +52,21 @@ class Pipeline:
         log.promotions_shown = len(relevant_promos)
         promos_text = self.promotions.format_promotions(relevant_promos)
 
-        # Layer 3: LLM generation
+        # Layer 3: LLM generation with history
         system = SYSTEM_PROMPT.format(context=context, promotions=promos_text)
 
+        # Get chat history for this user
+        chat_history = self.history.get(user_id)
+
         try:
-            response: LLMResponse = await self.llm.generate(system, user_message)
+            response: LLMResponse = await self.llm.generate(
+                system, user_message, history=chat_history
+            )
+
+            # Save to history
+            self.history.add(user_id, "user", user_message)
+            self.history.add(user_id, "assistant", response.text)
+
             log.bot_response = response.text
             log.llm_provider = type(self.llm).__name__
             log.llm_model = response.model

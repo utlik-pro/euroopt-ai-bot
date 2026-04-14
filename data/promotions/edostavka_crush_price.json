@@ -1,0 +1,17 @@
+[
+  {"name": "Пирожное бисквитное Медвежонок Барни с молочной начинкой", "old_price": "5.99", "new_price": "4.99", "size": "150 г", "discount_percent": 17, "end_date": "2026-04-12", "category": "сладости"},
+  {"name": "Жевательная резинка Dirol Colors XXL ассорти мятных вкусов", "old_price": "2.29", "new_price": "1.99", "size": "19 г", "discount_percent": 13, "end_date": "2026-04-12", "category": "сладости"},
+  {"name": "Крекер Tuc солёный мини со вкусом сыра", "old_price": "5.41", "new_price": "4.29", "size": "110 г", "discount_percent": 21, "end_date": "2026-04-12", "category": "снеки"},
+  {"name": "Шоколад Kinder Chocolate молочный", "old_price": "12.29", "new_price": "9.49", "size": "100 г", "discount_percent": 23, "end_date": "2026-04-12", "category": "сладости"},
+  {"name": "Набор конфет Raffaello", "old_price": "27.49", "new_price": "19.99", "size": "150 г", "discount_percent": 27, "end_date": "2026-04-12", "category": "сладости"},
+  {"name": "Зубная нить Oral-B Essential floss", "old_price": "9.99", "new_price": "8.79", "size": "50 м", "discount_percent": 12, "end_date": "2026-04-12", "category": "гигиена"},
+  {"name": "Батончик Gerber фруктово-злаковый виноград и яблоко", "old_price": "4.75", "new_price": "3.79", "size": "25 г", "discount_percent": 20, "end_date": "2026-04-12", "category": "детское питание"},
+  {"name": "Паста зубная детская Elmex Junior", "old_price": "17.35", "new_price": "12.99", "size": "75 мл", "discount_percent": 25, "end_date": "2026-04-12", "category": "гигиена"},
+  {"name": "Зубная щетка Oral-B Colors 40 средняя жесткость", "old_price": "15.69", "new_price": "13.89", "size": "4 шт", "discount_percent": 11, "end_date": "2026-04-12", "category": "гигиена"},
+  {"name": "Пена для бритья Gillette Foam Regular Классическая", "old_price": "11.99", "new_price": "10.69", "size": "200 мл", "discount_percent": 11, "end_date": "2026-04-12", "category": "гигиена"},
+  {"name": "Пюре овощное Gerber тыква", "old_price": "6.08", "new_price": "5.39", "size": "125 г", "discount_percent": 11, "end_date": "2026-04-12", "category": "детское питание"},
+  {"name": "Напиток молочный сухой Nestle Nestogen 3", "old_price": "43.99", "new_price": "36.99", "size": "900 г", "discount_percent": 16, "end_date": "2026-04-12", "category": "детское питание"},
+  {"name": "Бальзам-ополаскиватель Pro series глубокое восстановление", "old_price": "17.99", "new_price": "15.89", "size": "500 мл", "discount_percent": 12, "end_date": "2026-04-12", "category": "гигиена"},
+  {"name": "Паста зубная детская Colgate 6-9 лет", "old_price": "9.29", "new_price": "8.29", "size": "60 мл", "discount_percent": 11, "end_date": "2026-04-12", "category": "гигиена"},
+  {"name": "Кофе молотый Dallmayr prodomo (товар недели)", "old_price": "50.84", "new_price": "33.99", "size": "500 г", "discount_percent": 33, "end_date": "2026-04-12", "category": "напитки", "description": "При заказе на сумму от 80 руб"}
+]

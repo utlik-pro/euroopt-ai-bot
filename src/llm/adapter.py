@@ -135,16 +135,18 @@ class OpenAICompatibleProvider(LLMProvider):
         self.client = AsyncOpenAI(**kwargs)
         self.default_model = default_model
 
-    async def generate(self, system_prompt: str, user_message: str) -> LLMResponse:
-        model = settings.llm_model if settings.llm_model != "claude-sonnet-4-20250514" else self.default_model
+    async def generate(self, system_prompt: str, user_message: str,
+                       history: list[dict] | None = None) -> LLMResponse:
+        model = self.default_model if settings.llm_model.startswith("claude") else settings.llm_model
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
         response = await self.client.chat.completions.create(
             model=model,
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=messages,
         )
         choice = response.choices[0]
         usage = response.usage
@@ -220,6 +222,38 @@ class OpenAIProvider(OpenAICompatibleProvider):
             default_model="gpt-4o-mini",
             needs_proxy=True,
             relay_provider="openai",
+        )
+
+
+class OpenRouterProvider(OpenAICompatibleProvider):
+    """OpenRouter — доступ ко всем моделям через один API ключ.
+
+    Без санкционных рисков (серверы в EU/US, но оплата криптой/картой).
+    Модели: любые через OpenRouter (deepseek, claude, gemini, llama и т.д.)
+    """
+
+    def __init__(self):
+        super().__init__(
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            default_model="deepseek/deepseek-chat-v3-0324:free",
+            needs_proxy=False,
+        )
+
+
+class AtlasCloudProvider(OpenAICompatibleProvider):
+    """Atlas Cloud — агрегатор 300+ моделей, OpenAI-совместимый API.
+
+    DeepSeek, Claude, GPT, Gemini, GLM, Qwen, Kimi — всё через один ключ.
+    SLA 99.9%, SOC II compliance.
+    """
+
+    def __init__(self):
+        super().__init__(
+            api_key=settings.atlas_api_key,
+            base_url="https://api.atlascloud.ai/v1",
+            default_model="openai/gpt-4o-mini",
+            needs_proxy=False,
         )
 
 
@@ -348,6 +382,8 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "glm": GLMProvider,              # GLM-4-Flash, GLM-4
     "gemini": GeminiProvider,        # Gemini 2.0 Flash, 1.5 Pro
     "openai": OpenAIProvider,        # GPT-4o-mini
+    "openrouter": OpenRouterProvider, # Все модели через один ключ
+    "atlas": AtlasCloudProvider,     # Atlas Cloud — 300+ моделей, SLA 99.9%
     # Дополнительные (обсуждались на встрече)
     "qwen": QwenProvider,            # Qwen 2.5 (on-premise кандидат)
     "yandexgpt": YandexGPTProvider,  # YandexGPT
@@ -357,7 +393,7 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
 
 # Порядок фоллбэка: если основной провайдер недоступен, пробуем следующий.
 # Приоритет: несанкционные (работают из РБ без прокси) → санкционные (нужен прокси).
-_FALLBACK_ORDER = ["deepseek", "glm", "qwen", "gemini", "openai", "anthropic", "yandexgpt", "gigachat"]
+_FALLBACK_ORDER = ["atlas", "openrouter", "deepseek", "glm", "qwen", "gemini", "openai", "anthropic", "yandexgpt", "gigachat"]
 
 
 def get_llm_provider(provider_name: str | None = None) -> LLMProvider:
@@ -390,6 +426,8 @@ def get_llm_provider_with_fallback(provider_name: str | None = None) -> LLMProvi
             if fallback not in _SANCTIONED_PROVIDERS and fallback in _PROVIDERS:
                 # Проверяем что API ключ заполнен
                 key_map = {
+                    "atlas": settings.atlas_api_key,
+                    "openrouter": settings.openrouter_api_key,
                     "deepseek": settings.deepseek_api_key,
                     "glm": settings.glm_api_key,
                     "qwen": settings.qwen_api_key,
