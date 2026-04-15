@@ -11,8 +11,8 @@ build/
 
 # Data (generated)
 data/chroma/
-data/**/*.docx
-data/**/*.xlsx
+# Раньше исключали бинарники от заказчика — теперь включаем в репу
+# чтобы Render мог собрать образ с актуальной базой знаний
 logs/
 reports/
 
