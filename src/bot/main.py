@@ -1,6 +1,7 @@
 import asyncio
 import re
 import html
+import urllib.parse
 import structlog
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
@@ -280,6 +281,63 @@ async def main():
     )
 
     logger.info("bot_starting", model=settings.llm_model, provider=settings.llm_provider)
+
+    # Bootstrap: гарантируем что исходные файлы на Render Disk + RAG заполнен
+    try:
+        import os, urllib.request
+        from pathlib import Path
+
+        # 1. Скачиваем исходные файлы если их нет на диске (Render mount затирает /app/data)
+        BASE = "https://raw.githubusercontent.com/utlik-pro/euroopt-ai-bot/master"
+        REQUIRED = [
+            "data/faq/faq_eplus.docx",
+            "data/faq/general.json",
+            "data/faq/contacts.json",
+            "data/faq/contacts_full.json",
+            "data/promotions/sample.json",
+            "data/promotions/edostavka_crush_price.json",
+            "data/promotions_new/evroopt.xlsx",
+            "data/promotions_new/hitdiscount.xlsx",
+            "data/stores/euroopt.json",
+            "data/stores/stores_alexey.xlsx",
+            "data/stores_new/Список ТО ЕТ Хит с форматами.xlsx",
+            "data/udacha/igra.evroopt УВП.xlsx",
+            "data/recipes/sample.json",
+            "data/recipes/youtube.json",
+            "data/recipes/recipes_alexey.docx",
+        ]
+        missing = []
+        for rel in REQUIRED:
+            p = Path(rel)
+            if not p.exists() or p.stat().st_size < 100:
+                missing.append(rel)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                url = f"{BASE}/{urllib.parse.quote(rel)}"
+                try:
+                    urllib.request.urlretrieve(url, rel)
+                    logger.info("bootstrap_downloaded", file=rel)
+                except Exception as e:
+                    logger.warning("bootstrap_download_failed", file=rel, err=str(e))
+        if missing:
+            logger.warning("bootstrap_files_missing", count=len(missing))
+
+        # 2. Проверяем RAG — если пустой, пересобираем
+        from src.rag.engine import RAGEngine
+        rag = RAGEngine()
+        doc_count = rag.collection.count()
+        logger.info("rag_bootstrap_check", docs=doc_count)
+        if doc_count < 100:
+            logger.warning("rag_empty_running_reindex", docs=doc_count)
+            import subprocess, sys
+            result = subprocess.run(
+                [sys.executable, "scripts/reindex_v2.py"],
+                capture_output=True, text=True, timeout=600, cwd="/app",
+            )
+            logger.info("reindex_done", returncode=result.returncode,
+                        stdout_tail=(result.stdout or "")[-500:],
+                        stderr_tail=(result.stderr or "")[-500:])
+    except Exception as e:
+        logger.error("bootstrap_error", error=str(e), exc_info=True)
 
     pipeline = Pipeline()
     bot = Bot(
