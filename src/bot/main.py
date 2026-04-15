@@ -321,21 +321,25 @@ async def main():
         if missing:
             logger.warning("bootstrap_files_missing", count=len(missing))
 
-        # 2. Проверяем RAG — если пустой, пересобираем
+        # 2. Проверяем RAG — если пустой, пересобираем через прямой импорт (видим логи)
         from src.rag.engine import RAGEngine
         rag = RAGEngine()
         doc_count = rag.collection.count()
         logger.info("rag_bootstrap_check", docs=doc_count)
         if doc_count < 100:
             logger.warning("rag_empty_running_reindex", docs=doc_count)
-            import subprocess, sys
-            result = subprocess.run(
-                [sys.executable, "scripts/reindex_v2.py"],
-                capture_output=True, text=True, timeout=600, cwd="/app",
-            )
-            logger.info("reindex_done", returncode=result.returncode,
-                        stdout_tail=(result.stdout or "")[-500:],
-                        stderr_tail=(result.stderr or "")[-500:])
+            # Импорт модуля и запуск main() напрямую — логи видны в Render stdout
+            import sys, importlib.util
+            spec = importlib.util.spec_from_file_location("reindex_v2", "scripts/reindex_v2.py")
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["reindex_v2"] = mod
+            try:
+                spec.loader.exec_module(mod)
+                mod.main()
+                new_count = RAGEngine().collection.count()
+                logger.info("reindex_done", new_docs=new_count)
+            except Exception as ex:
+                logger.error("reindex_failed", error=str(ex), exc_info=True)
     except Exception as e:
         logger.error("bootstrap_error", error=str(e), exc_info=True)
 
