@@ -1,0 +1,65 @@
+# Render Blueprint — AI-помощник Евроопт Telegram bot
+# Создать через: Render Dashboard → New → Blueprint → указать репо
+
+services:
+  - type: worker                 # Background worker (не веб-сервер, нет HTTP порта)
+    name: euroopt-ai-bot
+    env: docker
+    plan: standard               # 2 GB RAM — минимум под e5 + ChromaDB (~$25/мес)
+    region: frankfurt            # ближайший к РБ регион Render (меньше latency)
+    autoDeploy: true             # авто-деплой на push в master
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # Persistent disk — чтобы данные переживали redeploy
+    disk:
+      name: euroopt-data
+      mountPath: /app/data
+      sizeGB: 1                  # $0.25/мес за 1 GB
+
+    envVars:
+      # Заполнить вручную в Render Dashboard → Environment
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ATLAS_API_KEY
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+
+      # LLM
+      - key: LLM_PROVIDER
+        value: atlas
+      - key: LLM_MODEL
+        value: openai/gpt-4o-mini
+      - key: LLM_TEMPERATURE
+        value: "0.3"
+      - key: LLM_MAX_TOKENS
+        value: "1024"
+      - key: LLM_TIMEOUT
+        value: "60"
+
+      # RAG
+      - key: EMBEDDING_MODEL
+        value: intfloat/multilingual-e5-base
+      - key: RAG_SCORE_THRESHOLD
+        value: "0.30"
+      - key: RAG_TOP_K
+        value: "5"
+      - key: CHROMA_PERSIST_DIR
+        value: /app/data/chroma
+
+      # Access control
+      - key: WHITELIST_ENABLED
+        value: "true"
+      - key: NON_PRIVATE_IGNORE
+        value: "true"
+      - key: RATE_LIMIT_PER_HOUR
+        value: "20"
+      - key: PRE_APPROVED_USERNAMES
+        value: dmitryutlik,yana_martynen,barysm
+
+      # Logging
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHONUNBUFFERED
+        value: "1"

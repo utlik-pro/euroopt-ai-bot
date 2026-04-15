@@ -1,0 +1,45 @@
+# Не тащим в образ — они есть либо в git (игнор через .gitignore), либо приватные
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+
+# Logs и отчёты — генерируются в рантайме на диске
+logs/
+reports/
+
+# Chroma — создаётся на Render Disk
+data/chroma/
+
+# Кэши
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Dev-only
+conversation-*.txt
+2026-*.txt
+tests/benchmark_*.py
+tests/test_*_live.py
+.taskmaster/
+.claude/
+.github/
+docs/
+README.md
+CLAUDE.md
+AGENTS.md
+AGENT.md
+GEMINI.md
+opencode.json
+
+# Приватные данные whitelist
+data/whitelist.json
+data/tester_list.json
