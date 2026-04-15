@@ -43,7 +43,7 @@ services:
   - key: RATE_LIMIT_PER_HOUR
     value: '20'
   - key: PRE_APPROVED_USERNAMES
-    value: dmitryutlik,yana_martynen,barysm
+    value: dmitryutlik,yana_martynen,barysm,Netkach
   - key: LOG_LEVEL
     value: INFO
   - key: PYTHONUNBUFFERED
