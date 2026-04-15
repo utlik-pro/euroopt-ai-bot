@@ -13,8 +13,14 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-_DATA_DIR = Path("data")
-_DATA_DIR.mkdir(exist_ok=True)
+import os
+# Ищем whitelist в persistent mount (если есть), иначе в data/
+_PERSIST = Path(os.environ.get("PERSIST_DIR", "/app/persist"))
+if _PERSIST.exists():
+    _DATA_DIR = _PERSIST
+else:
+    _DATA_DIR = Path("data")
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
 _PATH = _DATA_DIR / "whitelist.json"
 _LOCK = threading.Lock()
 

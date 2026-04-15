@@ -10,8 +10,11 @@ from aiogram.enums import ChatType
 from src.config import settings
 from src.bot import whitelist_store, rate_limit
 
-LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(exist_ok=True)
+import os
+# Логи пишем на persistent disk (чтобы переживали рестарты контейнера)
+_PERSIST = Path(os.environ.get("PERSIST_DIR", "/app/persist"))
+LOGS_DIR = _PERSIST / "logs" if _PERSIST.exists() else Path("logs")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 _TESTER_LIST_PATH = Path("data/tester_list.json")
 

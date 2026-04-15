@@ -20,9 +20,13 @@ COPY src/ ./src/
 COPY data/ ./data/
 COPY scripts/ ./scripts/
 
-# Create dirs (persistent volumes mount here on Render)
-RUN mkdir -p logs reports data/chroma
+# Create dirs
+RUN mkdir -p logs reports data/chroma persist/logs
 
+# Pre-build Chroma at image build (избегаем OOM на Render runtime)
+ENV CHROMA_PERSIST_DIR=/app/data/chroma
+ENV EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ENV PYTHONUNBUFFERED=1
+RUN python scripts/reindex_v2.py || echo "reindex at build finished"
 
 CMD ["python", "-m", "src.bot.main"]

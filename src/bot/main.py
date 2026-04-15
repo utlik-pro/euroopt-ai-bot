@@ -282,66 +282,14 @@ async def main():
 
     logger.info("bot_starting", model=settings.llm_model, provider=settings.llm_provider)
 
-    # Bootstrap: гарантируем что исходные файлы на Render Disk + RAG заполнен
+    # RAG предсобран в Docker image (избегаем OOM при runtime reindex).
+    # При изменениях данных нужен новый git push → Render пересоберёт образ.
     try:
-        import os, urllib.request
-        from pathlib import Path
-
-        # 1. Скачиваем исходные файлы если их нет на диске (Render mount затирает /app/data)
-        BASE = "https://raw.githubusercontent.com/utlik-pro/euroopt-ai-bot/master"
-        REQUIRED = [
-            "data/faq/faq_eplus.docx",
-            "data/faq/general.json",
-            "data/faq/contacts.json",
-            "data/faq/contacts_full.json",
-            "data/promotions/sample.json",
-            "data/promotions/edostavka_crush_price.json",
-            "data/promotions_new/evroopt.xlsx",
-            "data/promotions_new/hitdiscount.xlsx",
-            "data/stores/euroopt.json",
-            "data/stores/stores_alexey.xlsx",
-            "data/stores_new/Список ТО ЕТ Хит с форматами.xlsx",
-            "data/udacha/igra.evroopt УВП.xlsx",
-            "data/recipes/sample.json",
-            "data/recipes/youtube.json",
-            "data/recipes/recipes_alexey.docx",
-        ]
-        missing = []
-        for rel in REQUIRED:
-            p = Path(rel)
-            if not p.exists() or p.stat().st_size < 100:
-                missing.append(rel)
-                p.parent.mkdir(parents=True, exist_ok=True)
-                url = f"{BASE}/{urllib.parse.quote(rel)}"
-                try:
-                    urllib.request.urlretrieve(url, rel)
-                    logger.info("bootstrap_downloaded", file=rel)
-                except Exception as e:
-                    logger.warning("bootstrap_download_failed", file=rel, err=str(e))
-        if missing:
-            logger.warning("bootstrap_files_missing", count=len(missing))
-
-        # 2. Проверяем RAG — если пустой, пересобираем через прямой импорт (видим логи)
         from src.rag.engine import RAGEngine
         rag = RAGEngine()
-        doc_count = rag.collection.count()
-        logger.info("rag_bootstrap_check", docs=doc_count)
-        if doc_count < 100:
-            logger.warning("rag_empty_running_reindex", docs=doc_count)
-            # Импорт модуля и запуск main() напрямую — логи видны в Render stdout
-            import sys, importlib.util
-            spec = importlib.util.spec_from_file_location("reindex_v2", "scripts/reindex_v2.py")
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules["reindex_v2"] = mod
-            try:
-                spec.loader.exec_module(mod)
-                mod.main()
-                new_count = RAGEngine().collection.count()
-                logger.info("reindex_done", new_docs=new_count)
-            except Exception as ex:
-                logger.error("reindex_failed", error=str(ex), exc_info=True)
+        logger.info("rag_ready", docs=rag.collection.count())
     except Exception as e:
-        logger.error("bootstrap_error", error=str(e), exc_info=True)
+        logger.error("rag_init_error", error=str(e))
 
     pipeline = Pipeline()
     bot = Bot(

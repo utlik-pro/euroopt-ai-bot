@@ -8,8 +8,8 @@ services:
   dockerfilePath: ./Dockerfile
   dockerContext: .
   disk:
-    name: euroopt-data
-    mountPath: /app/data
+    name: euroopt-persist
+    mountPath: /app/persist
     sizeGB: 1
   envVars:
   - key: TELEGRAM_BOT_TOKEN
