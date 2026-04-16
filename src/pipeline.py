@@ -1,3 +1,4 @@
+import os
 import time
 import structlog
 
@@ -8,8 +9,13 @@ from src.rag.engine import RAGEngine
 from src.promotions.engine import PromotionEngine
 from src.chat_history import ChatHistory
 from src.monitoring.logger import interaction_logger, RequestLog
+from src.search.web import get_web_search
+from src.search.query_rewriter import rewrite_query
 
 logger = structlog.get_logger()
+
+ENABLE_REWRITE = os.environ.get("ENABLE_QUERY_REWRITE", "true").lower() == "true"
+WEB_FALLBACK_MIN_RESULTS = int(os.environ.get("WEB_FALLBACK_MIN_RESULTS", "2"))
 
 
 class Pipeline:
@@ -18,13 +24,15 @@ class Pipeline:
         self.rag = RAGEngine()
         self.promotions = PromotionEngine()
         self.history = ChatHistory(max_messages=20, ttl_minutes=60)
+        self.web = get_web_search()
 
     async def process(self, user_message: str, user_id: int) -> str:
-        """Process user message through the 3-layer pipeline.
+        """Process user message through the 4-layer pipeline.
 
         Layer 1: Content filter (block politics, religion, competitors)
-        Layer 2: RAG search + history context
-        Layer 3: LLM generation with chat history
+        Layer 2: Query rewrite (short → expanded)
+        Layer 3: RAG search + web search fallback
+        Layer 4: LLM generation with chat history
         """
         start_time = time.monotonic()
         log = RequestLog(user_id=user_id, user_message=user_message)
@@ -39,11 +47,37 @@ class Pipeline:
             interaction_logger.log_request(log)
             return refusal
 
-        # Layer 2: RAG search
-        rag_results = self.rag.search(user_message)
+        # Layer 2: Query rewrite (только для коротких запросов)
+        search_query = user_message
+        if ENABLE_REWRITE and len(user_message.split()) <= 8:
+            try:
+                search_query = await rewrite_query(user_message, self.llm)
+            except Exception as e:
+                logger.warning("rewrite_skipped", err=str(e))
+
+        # Layer 3a: RAG search
+        rag_results = self.rag.search(search_query)
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
-        context = "\n\n".join([r["text"] for r in rag_results]) if rag_results else "Нет релевантной информации в базе знаний."
+        context_parts = [r["text"] for r in rag_results]
+
+        # Layer 3b: Web search fallback (если RAG вернул мало)
+        web_context = ""
+        if self.web.enabled and len(rag_results) < WEB_FALLBACK_MIN_RESULTS:
+            try:
+                web_results = self.web.search(search_query, max_results=3)
+                if web_results:
+                    web_context = "\n\n---\nАктуальная информация с сайтов Евроторга:\n" + "\n".join(
+                        f"[{r['title']}]({r['url']})\n{r['content'][:500]}"
+                        for r in web_results[:3]
+                    )
+                    logger.info("web_fallback_used", query=search_query[:50], results=len(web_results))
+            except Exception as e:
+                logger.warning("web_fallback_error", err=str(e))
+
+        context = "\n\n".join(context_parts) if context_parts else "Нет релевантной информации в базе знаний."
+        if web_context:
+            context += web_context
 
         # Get relevant promotions
         relevant_promos = self.promotions.get_relevant_promotions(user_message)

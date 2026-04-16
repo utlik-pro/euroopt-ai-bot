@@ -48,3 +48,17 @@ services:
     value: INFO
   - key: PYTHONUNBUFFERED
     value: '1'
+  - key: TAVILY_API_KEY
+    sync: false
+  - key: WEB_SEARCH_ENABLED
+    value: 'false'
+  - key: WEB_SEARCH_DOMAINS
+    value: evroopt.by,hitdiscount.by,groshyk.by,igra.evroopt.by,eplus.by,e-dostavka.by
+  - key: WEB_SEARCH_CACHE_TTL
+    value: '21600'
+  - key: WEB_SEARCH_MAX_PER_DAY
+    value: '500'
+  - key: ENABLE_QUERY_REWRITE
+    value: 'true'
+  - key: WEB_FALLBACK_MIN_RESULTS
+    value: '2'
