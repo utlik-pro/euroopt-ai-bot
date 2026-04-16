@@ -38,15 +38,12 @@ async def rewrite_query(question: str, llm_adapter) -> str:
     """Rewrite короткий запрос в развёрнутый. Один LLM-вызов."""
     question = question.strip()
     if len(question) > 80 or len(question.split()) > 10:
-        return question  # Уже длинный — не переписываем
+        return question
 
     try:
         response = await llm_adapter.generate(
-            system="Ты переписываешь короткие запросы пользователей в развёрнутые поисковые запросы.",
-            user=REWRITE_PROMPT.format(question=question),
-            history=[],
-            max_tokens=100,
-            temperature=0.1,
+            "Ты переписываешь короткие запросы пользователей в развёрнутые поисковые запросы.",
+            REWRITE_PROMPT.format(question=question),
         )
         rewritten = (response.text or "").strip().strip('"').strip("'").strip()
         if rewritten and len(rewritten) > len(question):
@@ -62,11 +59,8 @@ async def generate_hyde(question: str, llm_adapter) -> str:
     """HyDE — генерирует гипотетический ответ для поиска."""
     try:
         response = await llm_adapter.generate(
-            system="Генерируй гипотетические ответы для поиска в базе знаний.",
-            user=HYDE_PROMPT.format(question=question),
-            history=[],
-            max_tokens=200,
-            temperature=0.3,
+            "Генерируй гипотетические ответы для поиска в базе знаний.",
+            HYDE_PROMPT.format(question=question),
         )
         hyde = (response.text or "").strip()
         if hyde:
@@ -75,4 +69,4 @@ async def generate_hyde(question: str, llm_adapter) -> str:
     except Exception as e:
         logger.warning("hyde_failed", error=str(e))
 
-    return question  # fallback — оригинал
+    return question

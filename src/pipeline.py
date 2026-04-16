@@ -16,6 +16,7 @@ logger = structlog.get_logger()
 
 ENABLE_REWRITE = os.environ.get("ENABLE_QUERY_REWRITE", "true").lower() == "true"
 WEB_FALLBACK_MIN_RESULTS = int(os.environ.get("WEB_FALLBACK_MIN_RESULTS", "2"))
+WEB_FALLBACK_MIN_SCORE = float(os.environ.get("WEB_FALLBACK_MIN_SCORE", "0.60"))
 
 
 class Pipeline:
@@ -61,9 +62,16 @@ class Pipeline:
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
         context_parts = [r["text"] for r in rag_results]
 
-        # Layer 3b: Web search fallback (если RAG вернул мало)
+        # Layer 3b: Web search fallback — если RAG вернул мало ИЛИ top_score низкий
         web_context = ""
-        if self.web.enabled and len(rag_results) < WEB_FALLBACK_MIN_RESULTS:
+        top_score = rag_results[0]["score"] if rag_results else 0.0
+        need_web = (
+            self.web.enabled and (
+                len(rag_results) < WEB_FALLBACK_MIN_RESULTS
+                or top_score < WEB_FALLBACK_MIN_SCORE
+            )
+        )
+        if need_web:
             try:
                 web_results = self.web.search(search_query, max_results=3)
                 if web_results:
