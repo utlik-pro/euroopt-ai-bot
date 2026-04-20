@@ -19,34 +19,42 @@ ENABLE_REWRITE = os.environ.get("ENABLE_QUERY_REWRITE", "true").lower() == "true
 WEB_FALLBACK_MIN_RESULTS = int(os.environ.get("WEB_FALLBACK_MIN_RESULTS", "2"))
 WEB_FALLBACK_MIN_SCORE = float(os.environ.get("WEB_FALLBACK_MIN_SCORE", "0.60"))
 
-# Триггеры для принудительного web search — вопросы про актуальные акции.
-# xlsx-выгрузка акций обновляется не каждый день, поэтому для таких запросов
-# мы ВСЕГДА ходим в Tavily, даже если RAG нашёл что-то релевантное.
-FRESH_PROMO_SUBSTRINGS = (
-    # Ключевые слова про акции (корни — цепляет все склонения)
+# Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
+# Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
+FRESH_PROMO_STRONG = (
     "акци", "скидк", "скидочн", "ценопад", "распродаж",
-    # Временные маркеры актуальности
-    "сегодня", "сейчас", "на этой неделе", "эта недел", "в этом месяц",
-    # Свежесть/новизна
-    "актуальн", "свеж", "нов",
-    # Конкретные названия акций Евроторга (с сайта evroopt.by/deals/)
     "красная цена", "чёрная пятниц", "черная пятниц",
     "чёрные цен", "чёрная цен", "черные цен", "черная цен",
     "цены вниз",
+)
+
+# Старый алиас для обратной совместимости тестов test_fresh_promo_trigger.py —
+# включает явные promo + временные маркеры (без явного promo может быть не promo).
+FRESH_PROMO_SUBSTRINGS = FRESH_PROMO_STRONG + (
+    "сегодня", "сейчас", "на этой неделе", "эта недел", "в этом месяц",
+    "актуальн", "свеж", "нов",
 )
 
 
 def needs_fresh_promo(msg: str) -> bool:
     """Пользователь спрашивает про актуальные цены/акции → форсим web search.
 
-    Простой substring-матч без regex — надёжнее на кириллице чем \\b.
-    Ловит все склонения слова «акция» через корень «акци», скидки через
-    «скидк», и т.п. Ложных срабатываний минимум (проверено тестами).
+    Триггерят либо явные слова (акция, скидка, ценопад), либо временные маркеры
+    (сегодня, сейчас) — но сами по себе временные маркеры не означают promo,
+    проверяй приоритет с needs_fresh_data() в pipeline.
     """
     if not msg:
         return False
     low = msg.lower()
     return any(s in low for s in FRESH_PROMO_SUBSTRINGS)
+
+
+def has_strong_promo_signal(msg: str) -> bool:
+    """Явный сигнал promo (акция/скидка/ценопад) — перебивает fresh_data."""
+    if not msg:
+        return False
+    low = msg.lower()
+    return any(s in low for s in FRESH_PROMO_STRONG)
 
 
 # Бренды/темы Евроторга — если вопрос содержит хоть одно, он «про нас»
@@ -143,12 +151,20 @@ class Pipeline:
 
         if need_web:
             try:
-                # Определяем: искать по доменам Евроторга или в общем интернете?
-                # По доменам — только если явно про Евроторг.
-                use_eurotorg_domains = eurotorg_q or fresh_promo
-
-                if fresh_promo:
-                    # Promo-запросы: нормализуем склонения «Евроопте» → «Евроопт».
+                # Приоритеты:
+                #   1. Явный promo-сигнал (акция/скидка) — всегда promo-ветка
+                #   2. fresh_data (погода/курс/новости без явного promo) — общий интернет
+                #   3. fresh_promo по временному маркеру (сегодня/сейчас) — promo-ветка
+                #   4. eurotorg_q — по доменам Евроторга
+                #   5. всё остальное — общий интернет
+                strong_promo = has_strong_promo_signal(user_message)
+                if fresh_data and not strong_promo:
+                    # Свежие данные (погода/курс/новости): общий интернет, без бренд-фильтра.
+                    web_query = user_message.replace("?", "").strip()
+                    use_eurotorg_domains = False
+                    reason = "fresh_data"
+                elif fresh_promo:
+                    # Promo: по доменам Евроторга с нормализацией «Евроопте» → «Евроопт».
                     import re as _re
                     base = _re.sub(r"[?!]+", "", user_message)
                     base = _re.sub(r"\b[Ее]врооп\w*", "Евроопт", base)
@@ -157,15 +173,17 @@ class Pipeline:
                         web_query = f"{web_query} Евроопт"
                     if "акци" not in web_query.lower() and "скидк" not in web_query.lower():
                         web_query = f"акции {web_query}"
+                    use_eurotorg_domains = True
                     reason = "fresh_promo"
-                elif fresh_data:
-                    web_query = user_message.replace("?", "").strip()
-                    reason = "fresh_data"
                 elif eurotorg_q:
+                    # Слабый RAG + вопрос про Евроторг: по доменам Евроторга с rewritten query.
                     web_query = search_query
+                    use_eurotorg_domains = True
                     reason = "weak_rag_eurotorg"
                 else:
+                    # Слабый RAG + общий вопрос: общий интернет.
                     web_query = user_message.replace("?", "").strip()
+                    use_eurotorg_domains = False
                     reason = "weak_rag_general"
 
                 web_results = self.web.search(
