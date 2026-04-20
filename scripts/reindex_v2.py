@@ -69,12 +69,12 @@ def load_faq_json():
         for i, it in enumerate(items):
             q = it.get("question") or ""
             a = it.get("answer") or ""
-            # Заменяем упоминания e-доставки на evroopt.by (по требованию клиента)
-            a = a.replace("e-dostavka.by", "evroopt.by")
-            a = a.replace("edostavka.by", "evroopt.by")
-            a = a.replace("Едоставка", "Евроопт")
-            a = a.replace("e-доставка", "сеть Евроопт")
-            a = a.replace("е-доставка", "сеть Евроопт")
+            # Автозамена устаревшего домена только для "грязных" источников (contacts*).
+            # general.json уже вычищен вручную и может содержать осмысленные упоминания
+            # "e-доставка" / "Едоставка" (в ответе-объяснении что это устарело).
+            if "contact" in fn:
+                a = a.replace("e-dostavka.by", "evroopt.by")
+                a = a.replace("edostavka.by", "evroopt.by")
             text = "Контакты Евроторг" if "contact" in fn else "Часто задаваемый вопрос"
             text += f"\n\nВопрос: {q}\nОтвет: {a}"
             add(f"faq_{fn}_{i}", text, "faq", source=fn)
