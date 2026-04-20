@@ -49,6 +49,27 @@ def needs_fresh_promo(msg: str) -> bool:
     return any(s in low for s in FRESH_PROMO_SUBSTRINGS)
 
 
+# Триггеры для ОБЩЕГО интернет-поиска (без фильтра по доменам Евроторга).
+# Когда пользователь спрашивает про погоду/курс/время/факты, Tavily идёт во весь
+# интернет и приносит живой ответ. Для acций остаётся доменный фильтр (отдельный триггер).
+GENERAL_WEB_SUBSTRINGS = (
+    "погод", "прогноз погод", "прогноз дожд",
+    "курс валют", "курс доллар", "курс евро", "курс рубл", "обменный курс",
+    "сколько время", "который час", "сколько сейчас",
+    "новост", "что в мире", "что произошл",
+    "пробк", "ситуация на дорог",
+    "где находится", "что такое", "кто такой", "когда был", "когда будет",
+)
+
+
+def needs_general_web(msg: str) -> bool:
+    """Вопрос общего характера (погода/время/курс/факт) → web без доменного фильтра."""
+    if not msg:
+        return False
+    low = msg.lower()
+    return any(s in low for s in GENERAL_WEB_SUBSTRINGS)
+
+
 class Pipeline:
     def __init__(self):
         self.llm = get_llm_provider_with_fallback()
@@ -91,24 +112,29 @@ class Pipeline:
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
 
-        # Layer 3b: Web search — fallback при слабом RAG ИЛИ форс для вопросов про акции
+        # Layer 3b: Web search — fallback при слабом RAG ИЛИ форс для promo/общих вопросов
         web_results: list[dict] = []
         top_score = rag_results[0]["score"] if rag_results else 0.0
         fresh_promo = needs_fresh_promo(user_message)
+        general_web = needs_general_web(user_message)
         need_web = self.web.enabled and (
             fresh_promo
+            or general_web
             or len(rag_results) < WEB_FALLBACK_MIN_RESULTS
             or top_score < WEB_FALLBACK_MIN_SCORE
         )
         if need_web:
             try:
-                # Для promo-запросов rewriter может навредить (заменить «Евроопт» на «Евроторг»,
-                # добавить лишних слов). Tavily лучше находит по исходной формулировке +
-                # обязательно со словом «Евроопт» (поскольку домены фильтруем по evroopt.by).
-                if fresh_promo:
+                # Общие вопросы (погода/курс/время/факты) → Tavily без доменного фильтра.
+                if general_web:
+                    web_query = user_message.replace("?", "").strip()
+                    web_results = self.web.search(
+                        web_query, max_results=3, include_general=True
+                    )
+                    reason = "general_web"
+                # Promo-запросы — только на доменах Евроторга с нормализацией.
+                elif fresh_promo:
                     import re as _re
-                    # Нормализуем: убираем ?/!, приводим склонения «Евроопт» к именительному
-                    # (Tavily чувствителен: «в Евроопте» даёт 0 hits, «Евроопт» — находит).
                     base = _re.sub(r"[?!]+", "", user_message)
                     base = _re.sub(r"\b[Ее]врооп\w*", "Евроопт", base)
                     web_query = base.strip()
@@ -116,15 +142,19 @@ class Pipeline:
                         web_query = f"{web_query} Евроопт"
                     if "акци" not in web_query.lower() and "скидк" not in web_query.lower():
                         web_query = f"акции {web_query}"
+                    web_results = self.web.search(web_query, max_results=3)
+                    reason = "fresh_promo"
+                # Fallback при слабом RAG — rewritten query по доменам Евроторга.
                 else:
-                    web_query = search_query  # для weak_rag используем rewritten (больше контекста)
-                web_results = self.web.search(web_query, max_results=3)
+                    web_query = search_query
+                    web_results = self.web.search(web_query, max_results=3)
+                    reason = "weak_rag"
                 if web_results:
                     logger.info(
                         "web_fallback_used",
-                        query=web_query[:50],
+                        query=web_query[:60],
                         results=len(web_results),
-                        reason="fresh_promo" if fresh_promo else "weak_rag",
+                        reason=reason,
                     )
             except Exception as e:
                 logger.warning("web_fallback_error", err=str(e))
