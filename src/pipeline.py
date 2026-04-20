@@ -49,25 +49,40 @@ def needs_fresh_promo(msg: str) -> bool:
     return any(s in low for s in FRESH_PROMO_SUBSTRINGS)
 
 
-# Триггеры для ОБЩЕГО интернет-поиска (без фильтра по доменам Евроторга).
-# Когда пользователь спрашивает про погоду/курс/время/факты, Tavily идёт во весь
-# интернет и приносит живой ответ. Для acций остаётся доменный фильтр (отдельный триггер).
-GENERAL_WEB_SUBSTRINGS = (
-    "погод", "прогноз погод", "прогноз дожд",
-    "курс валют", "курс доллар", "курс евро", "курс рубл", "обменный курс",
-    "сколько время", "который час", "сколько сейчас",
-    "новост", "что в мире", "что произошл",
-    "пробк", "ситуация на дорог",
-    "где находится", "что такое", "кто такой", "когда был", "когда будет",
+# Бренды/темы Евроторга — если вопрос содержит хоть одно, он «про нас»
+# и web search должен идти по доменам евроопта (а не в общий интернет).
+EUROTORG_BRAND_SUBSTRINGS = (
+    "евроопт", "грошык", "хит дискаунтер", "хитдис", "еплюс", "e-plus",
+    "ямигом", "я мигом", "едоставка", "е-доставка", "e-dostavka", "evroopt",
+    "евроторг", "магазин", "карта лояльн", "бонусн", "еўраопт",
 )
 
 
-def needs_general_web(msg: str) -> bool:
-    """Вопрос общего характера (погода/время/курс/факт) → web без доменного фильтра."""
+def is_eurotorg_question(msg: str) -> bool:
+    """Вопрос содержит бренд/тему Евроторга? (тогда web → по доменам бренда)."""
     if not msg:
         return False
     low = msg.lower()
-    return any(s in low for s in GENERAL_WEB_SUBSTRINGS)
+    return any(s in low for s in EUROTORG_BRAND_SUBSTRINGS)
+
+
+# Триггеры «нужны свежие данные из интернета даже если вопрос общий».
+# Используется только для решения «идти ли в Tavily общий интернет» — если RAG
+# сам знает ответ, LLM отвечает без Tavily (экономим квоту).
+FRESH_DATA_SUBSTRINGS = (
+    "погод", "прогноз", "курс валют", "курс доллар", "курс евро", "курс рубл",
+    "обменный курс", "сколько время", "который час", "сколько сейчас",
+    "новост", "что в мире", "что произошл", "пробк", "ситуация на дорог",
+    "сегодня", "сейчас", "недавно", "свеж", "актуальн",
+)
+
+
+def needs_fresh_data(msg: str) -> bool:
+    """Нужны ли актуальные данные из интернета (погода, курс, время, новости)."""
+    if not msg:
+        return False
+    low = msg.lower()
+    return any(s in low for s in FRESH_DATA_SUBSTRINGS)
 
 
 class Pipeline:
@@ -112,28 +127,28 @@ class Pipeline:
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
 
-        # Layer 3b: Web search — fallback при слабом RAG ИЛИ форс для promo/общих вопросов
+        # Layer 3b: Web search — решаем стоит ли идти в Tavily и куда (бренд/общий).
+        # Принцип: content-фильтр = единственный запрет; всё остальное — отвечаем
+        # полноценно. Web search берём только когда RAG слабый ИЛИ нужна свежесть
+        # (акции/погода/курс). Для Евроторг-тем → фильтр по доменам, иначе → общий.
         web_results: list[dict] = []
         top_score = rag_results[0]["score"] if rag_results else 0.0
         fresh_promo = needs_fresh_promo(user_message)
-        general_web = needs_general_web(user_message)
-        need_web = self.web.enabled and (
-            fresh_promo
-            or general_web
-            or len(rag_results) < WEB_FALLBACK_MIN_RESULTS
-            or top_score < WEB_FALLBACK_MIN_SCORE
-        )
+        fresh_data = needs_fresh_data(user_message)
+        eurotorg_q = is_eurotorg_question(user_message)
+
+        rag_weak = len(rag_results) < WEB_FALLBACK_MIN_RESULTS or top_score < WEB_FALLBACK_MIN_SCORE
+        # Идём в web если: (а) акции Евроторга; (б) нужны свежие данные; (в) RAG слабый.
+        need_web = self.web.enabled and (fresh_promo or fresh_data or rag_weak)
+
         if need_web:
             try:
-                # Общие вопросы (погода/курс/время/факты) → Tavily без доменного фильтра.
-                if general_web:
-                    web_query = user_message.replace("?", "").strip()
-                    web_results = self.web.search(
-                        web_query, max_results=3, include_general=True
-                    )
-                    reason = "general_web"
-                # Promo-запросы — только на доменах Евроторга с нормализацией.
-                elif fresh_promo:
+                # Определяем: искать по доменам Евроторга или в общем интернете?
+                # По доменам — только если явно про Евроторг.
+                use_eurotorg_domains = eurotorg_q or fresh_promo
+
+                if fresh_promo:
+                    # Promo-запросы: нормализуем склонения «Евроопте» → «Евроопт».
                     import re as _re
                     base = _re.sub(r"[?!]+", "", user_message)
                     base = _re.sub(r"\b[Ее]врооп\w*", "Евроопт", base)
@@ -142,19 +157,29 @@ class Pipeline:
                         web_query = f"{web_query} Евроопт"
                     if "акци" not in web_query.lower() and "скидк" not in web_query.lower():
                         web_query = f"акции {web_query}"
-                    web_results = self.web.search(web_query, max_results=3)
                     reason = "fresh_promo"
-                # Fallback при слабом RAG — rewritten query по доменам Евроторга.
-                else:
+                elif fresh_data:
+                    web_query = user_message.replace("?", "").strip()
+                    reason = "fresh_data"
+                elif eurotorg_q:
                     web_query = search_query
-                    web_results = self.web.search(web_query, max_results=3)
-                    reason = "weak_rag"
+                    reason = "weak_rag_eurotorg"
+                else:
+                    web_query = user_message.replace("?", "").strip()
+                    reason = "weak_rag_general"
+
+                web_results = self.web.search(
+                    web_query,
+                    max_results=3,
+                    include_general=not use_eurotorg_domains,
+                )
                 if web_results:
                     logger.info(
                         "web_fallback_used",
                         query=web_query[:60],
                         results=len(web_results),
                         reason=reason,
+                        domains="eurotorg" if use_eurotorg_domains else "general",
                     )
             except Exception as e:
                 logger.warning("web_fallback_error", err=str(e))
