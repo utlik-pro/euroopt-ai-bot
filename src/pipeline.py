@@ -3,6 +3,7 @@ import time
 import structlog
 
 from src.filters.content_filter import check_content
+from src.filters.prompt_sanitizer import build_kb_block, build_web_block
 from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
 from src.llm.prompts import SYSTEM_PROMPT
 from src.rag.engine import RAGEngine
@@ -60,10 +61,9 @@ class Pipeline:
         rag_results = self.rag.search(search_query)
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
-        context_parts = [r["text"] for r in rag_results]
 
         # Layer 3b: Web search fallback — если RAG вернул мало ИЛИ top_score низкий
-        web_context = ""
+        web_results: list[dict] = []
         top_score = rag_results[0]["score"] if rag_results else 0.0
         need_web = (
             self.web.enabled and (
@@ -75,17 +75,15 @@ class Pipeline:
             try:
                 web_results = self.web.search(search_query, max_results=3)
                 if web_results:
-                    web_context = "\n\n---\nАктуальная информация с сайтов Евроторга:\n" + "\n".join(
-                        f"[{r['title']}]({r['url']})\n{r['content'][:500]}"
-                        for r in web_results[:3]
-                    )
                     logger.info("web_fallback_used", query=search_query[:50], results=len(web_results))
             except Exception as e:
                 logger.warning("web_fallback_error", err=str(e))
+                web_results = []
 
-        context = "\n\n".join(context_parts) if context_parts else "Нет релевантной информации в базе знаний."
-        if web_context:
-            context += web_context
+        # Контекст собирается через санитайзер: XML-теги + нейтрализация injection
+        kb_block = build_kb_block(rag_results)
+        web_block = build_web_block(web_results[:3]) if web_results else ""
+        context = kb_block + ("\n\n" + web_block if web_block else "")
 
         # Get relevant promotions
         relevant_promos = self.promotions.get_relevant_promotions(user_message)

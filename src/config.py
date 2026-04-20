@@ -69,6 +69,19 @@ class Settings(BaseSettings):
     )
     non_private_ignore: bool = Field(default=True, env="NON_PRIVATE_IGNORE")
 
+    # Web search (Tavily) — fallback когда RAG слабый
+    tavily_api_key: str = Field(default="", env="TAVILY_API_KEY")
+    web_search_enabled: bool = Field(default=False, env="WEB_SEARCH_ENABLED")
+    web_search_domains: str = Field(
+        default="evroopt.by,hitdiscount.by,groshyk.by,igra.evroopt.by,eplus.by,e-dostavka.by",
+        env="WEB_SEARCH_DOMAINS",
+    )
+    web_search_cache_ttl: int = Field(default=21600, env="WEB_SEARCH_CACHE_TTL")
+    web_search_max_per_day: int = Field(default=500, env="WEB_SEARCH_MAX_PER_DAY")
+    web_fallback_min_results: int = Field(default=2, env="WEB_FALLBACK_MIN_RESULTS")
+    web_fallback_min_score: float = Field(default=0.60, env="WEB_FALLBACK_MIN_SCORE")
+    enable_query_rewrite: bool = Field(default=True, env="ENABLE_QUERY_REWRITE")
+
     def pre_approved_usernames_set(self) -> set[str]:
         return {u.strip().lstrip("@").lower() for u in self.pre_approved_usernames.split(",") if u.strip()}
 
@@ -80,7 +93,7 @@ class Settings(BaseSettings):
                 result.add(int(x))
         return result
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
