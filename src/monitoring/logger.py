@@ -9,6 +9,7 @@
 """
 
 import json
+import os
 import time
 from datetime import datetime, date
 from pathlib import Path
@@ -18,8 +19,13 @@ import structlog
 
 logger = structlog.get_logger()
 
-LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(exist_ok=True)
+# Логи идут в persistent volume на Render (mountPath: /app/persist), иначе
+# каждый деплой = Docker rebuild = потеря JSONL. Локально — просто ./logs.
+# Можно переопределить через env LOGS_DIR.
+_DEFAULT_LOGS_DIR = "/app/persist/logs" if Path("/app/persist").exists() else "logs"
+LOGS_DIR = Path(os.environ.get("LOGS_DIR", _DEFAULT_LOGS_DIR))
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+logger.info("interaction_logs_dir", path=str(LOGS_DIR))
 
 
 # Стоимость за 1K input/output токенов (BYN, приблизительно)
