@@ -116,12 +116,16 @@ class WebSearchClient:
                 })
 
             with self._lock:
-                self._cache[key] = (time.time(), results)
+                # Не кэшируем пустые ответы — они часто результат капризов Tavily на
+                # конкретной формулировке. Иначе пустота залипает на 6 часов.
+                if results:
+                    self._cache[key] = (time.time(), results)
                 self._daily_count += 1
 
             logger.info("web_search_done",
                         query=query[:50], results=len(results),
-                        duration_ms=dt, daily_count=self._daily_count)
+                        duration_ms=dt, daily_count=self._daily_count,
+                        cached=bool(results))
             return results
         except Exception as e:
             logger.error("web_search_error", query=query[:50], error=str(e))

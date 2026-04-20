@@ -102,10 +102,22 @@ class Pipeline:
         )
         if need_web:
             try:
-                # Для вопросов про акции — явно запрашиваем страницу акций
-                web_query = search_query
-                if fresh_promo and "акци" not in web_query.lower() and "скидк" not in web_query.lower():
-                    web_query = f"{search_query} акции скидки Евроопт"
+                # Для promo-запросов rewriter может навредить (заменить «Евроопт» на «Евроторг»,
+                # добавить лишних слов). Tavily лучше находит по исходной формулировке +
+                # обязательно со словом «Евроопт» (поскольку домены фильтруем по evroopt.by).
+                if fresh_promo:
+                    import re as _re
+                    # Нормализуем: убираем ?/!, приводим склонения «Евроопт» к именительному
+                    # (Tavily чувствителен: «в Евроопте» даёт 0 hits, «Евроопт» — находит).
+                    base = _re.sub(r"[?!]+", "", user_message)
+                    base = _re.sub(r"\b[Ее]врооп\w*", "Евроопт", base)
+                    web_query = base.strip()
+                    if "евроопт" not in web_query.lower():
+                        web_query = f"{web_query} Евроопт"
+                    if "акци" not in web_query.lower() and "скидк" not in web_query.lower():
+                        web_query = f"акции {web_query}"
+                else:
+                    web_query = search_query  # для weak_rag используем rewritten (больше контекста)
                 web_results = self.web.search(web_query, max_results=3)
                 if web_results:
                     logger.info(
