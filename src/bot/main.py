@@ -142,11 +142,24 @@ async def _gate(message: types.Message, incoming_text: str) -> bool:
         return False
 
     # 4. Rate limit
-    allowed, remaining = check_rate_limit(user.id)
+    allowed, remaining, reset_in = check_rate_limit(user.id)
     if not allowed:
-        log_access(user, "rate_limited", reason=f"limit={settings.rate_limit_per_hour}/h", chat_type=chat_type)
-        await message.answer(settings.rate_limit_message)
-        log_message(user, "out", settings.rate_limit_message, extra={"rate_limited": True})
+        # Формируем сообщение с точным временем когда освободится следующий слот.
+        mins = max(1, reset_in // 60)
+        secs = reset_in % 60
+        if mins >= 2:
+            wait_txt = f"через {mins} мин"
+        elif mins == 1 and secs < 30:
+            wait_txt = f"через {secs} сек"
+        else:
+            wait_txt = f"через 1 мин"
+        limit_msg = (
+            f"⏳ Достигнут лимит {settings.rate_limit_per_hour} сообщений в час. "
+            f"Следующий вопрос можно задать {wait_txt}."
+        )
+        log_access(user, "rate_limited", reason=f"limit={settings.rate_limit_per_hour}/h,reset_in={reset_in}s", chat_type=chat_type)
+        await message.answer(limit_msg)
+        log_message(user, "out", limit_msg, extra={"rate_limited": True, "reset_in_sec": reset_in})
         return False
 
     log_access(user, "approved", reason=f"ok,remaining={remaining}", chat_type=chat_type)

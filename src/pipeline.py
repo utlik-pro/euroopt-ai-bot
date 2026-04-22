@@ -12,6 +12,7 @@ from src.chat_history import ChatHistory
 from src.monitoring.logger import interaction_logger, RequestLog
 from src.search.web import get_web_search
 from src.search.query_rewriter import rewrite_query
+from src.search.typo_normalizer import normalize_typos
 
 logger = structlog.get_logger()
 
@@ -122,11 +123,17 @@ class Pipeline:
             interaction_logger.log_request(log)
             return refusal
 
-        # Layer 2: Query rewrite (только для коротких запросов)
-        search_query = user_message
-        if ENABLE_REWRITE and len(user_message.split()) <= 8:
+        # Layer 2a: нормализация опечаток для search (оригинал user_message не меняем!)
+        # «скидкиии» → «скидки», «едаставка» → «едоставка» и т.п.
+        normalized = normalize_typos(user_message)
+        if normalized != user_message:
+            logger.info("typo_normalized", original=user_message[:60], normalized=normalized[:60])
+
+        # Layer 2b: Query rewrite (только для коротких запросов)
+        search_query = normalized
+        if ENABLE_REWRITE and len(normalized.split()) <= 8:
             try:
-                search_query = await rewrite_query(user_message, self.llm)
+                search_query = await rewrite_query(normalized, self.llm)
             except Exception as e:
                 logger.warning("rewrite_skipped", err=str(e))
 

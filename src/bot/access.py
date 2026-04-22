@@ -68,7 +68,8 @@ def is_private(message: types.Message) -> bool:
     return message.chat.type == ChatType.PRIVATE
 
 
-def check_rate_limit(user_id: int) -> tuple[bool, int]:
+def check_rate_limit(user_id: int) -> tuple[bool, int, int]:
+    """(allowed, remaining, reset_in_sec). reset_in_sec = 0 если allowed."""
     return rate_limit.check(user_id, settings.rate_limit_per_hour, 3600)
 
 
