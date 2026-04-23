@@ -10,6 +10,13 @@ from aiogram.client.default import DefaultBotProperties
 
 from src.config import settings
 from src.pipeline import Pipeline
+
+# PII-фильтр выкатывается отдельным релизом — пока stub.
+try:
+    from src.filters.pii_filter import mask_pii  # type: ignore
+except ImportError:
+    def mask_pii(text: str) -> tuple[str, list]:
+        return text, []
 from src.bot.access import (
     log_access,
     log_message,
@@ -99,7 +106,9 @@ async def _gate(message: types.Message, incoming_text: str) -> bool:
     """Полный gate: private-only → whitelist → rate limit. Возвращает True если доступ разрешён."""
     user = message.from_user
     chat_type = message.chat.type
-    log_message(user, "in", incoming_text, extra={"chat_type": chat_type, "chat_id": message.chat.id})
+    # ДС №1 п. 2.1.1: входящий текст в лог пишем замаскированным.
+    masked_incoming, _ = mask_pii(incoming_text)
+    log_message(user, "in", masked_incoming, extra={"chat_type": chat_type, "chat_id": message.chat.id})
 
     # 1. Private only
     if settings.non_private_ignore and not is_private(message):
@@ -271,7 +280,9 @@ async def handle_message(message: types.Message):
     if not await _gate(message, message.text):
         return
 
-    logger.info("user_message", user_id=message.from_user.id, username=message.from_user.username, text=message.text[:100])
+    # structlog-превью тоже маскируем: сырой текст в stdout не должен течь.
+    masked_preview, _ = mask_pii(message.text[:100])
+    logger.info("user_message", user_id=message.from_user.id, username=message.from_user.username, text=masked_preview)
 
     # Show typing indicator
     await message.bot.send_chat_action(message.chat.id, "typing")
