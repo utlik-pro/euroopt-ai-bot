@@ -407,16 +407,23 @@ def get_llm_provider(provider_name: str | None = None) -> LLMProvider:
 def get_llm_provider_with_fallback(provider_name: str | None = None) -> LLMProvider:
     """Получить LLM-провайдер с автоматическим фоллбэком.
 
-    Если основной провайдер санкционный и прокси не настроен,
-    автоматически переключается на несанкционный.
+    Если основной провайдер санкционный и прокси не настроен, автоматически
+    переключается на несанкционный. На несанкционном хосте (напр. Render EU)
+    задайте FORCE_DIRECT_LLM=true чтобы обойти fallback и идти в openai/
+    anthropic/gemini напрямую (там санкции не действуют).
     """
+    import os
     import structlog
     logger = structlog.get_logger()
 
     name = provider_name or settings.llm_provider
+    force_direct = os.environ.get("FORCE_DIRECT_LLM", "").lower() in ("true", "1", "yes")
 
-    # Если санкционный провайдер без прокси — предупредить и переключить
-    if name in _SANCTIONED_PROVIDERS and not settings.llm_proxy_url:
+    # Если санкционный провайдер и нет ни прокси, ни релея, ни force_direct — fallback.
+    if (name in _SANCTIONED_PROVIDERS
+            and not settings.llm_proxy_url
+            and not settings.relay_url
+            and not force_direct):
         logger.warning(
             "sanctioned_provider_no_proxy",
             provider=name,
