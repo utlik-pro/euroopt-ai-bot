@@ -3,6 +3,7 @@ import time
 import structlog
 
 from src.filters.content_filter import check_content
+from src.filters.pii_filter import mask_pii
 from src.filters.prompt_sanitizer import build_kb_block, build_web_block
 from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
 from src.llm.prompts import SYSTEM_PROMPT
@@ -111,10 +112,25 @@ class Pipeline:
         Layer 4: LLM generation with chat history
         """
         start_time = time.monotonic()
-        log = RequestLog(user_id=user_id, user_message=user_message)
+        # ДС №1 п. 2.1.1: в лог user_message пишем УЖЕ маскированным —
+        # сырые ПДн не должны попадать в JSONL.
+        masked_user_message, pii_in_types = mask_pii(user_message)
+        log = RequestLog(
+            user_id=user_id,
+            user_message=masked_user_message,
+            pii_detected_input=pii_in_types,
+        )
+        if pii_in_types:
+            logger.info(
+                "pii_detected_input",
+                user_id=user_id,
+                types=pii_in_types,
+                count=len(pii_in_types),
+            )
 
-        # Layer 1: Content filter
-        is_allowed, refusal = check_content(user_message)
+        # Layer 1: Content filter (по маскированному тексту — фильтру ПДн не нужны,
+        # а заблокированные темы всё равно детектируются по ключевым словам).
+        is_allowed, refusal = check_content(masked_user_message)
         if not is_allowed:
             log.content_filtered = True
             log.filter_reason = "blocked"
@@ -122,6 +138,12 @@ class Pipeline:
             log.response_time_ms = int((time.monotonic() - start_time) * 1000)
             interaction_logger.log_request(log)
             return refusal
+
+        # После контент-фильтра ВСЯ дальнейшая работа — с masked_user_message.
+        # Приложение №1 к ДС №1: маскирование ДО передачи во внешние сервисы
+        # (LLM, web search). Оригинал пользователь видит у себя, мы его нигде не
+        # сохраняем и никуда не отправляем.
+        user_message = masked_user_message
 
         # Layer 2a: нормализация опечаток для search (оригинал user_message не меняем!)
         # «скидкиии» → «скидки», «едаставка» → «едоставка» и т.п.
@@ -168,6 +190,12 @@ class Pipeline:
                 if fresh_data and not strong_promo:
                     # Свежие данные (погода/курс/новости): общий интернет, без бренд-фильтра.
                     web_query = user_message.replace("?", "").strip()
+                    # Для курсов валют форсим контекст Беларуси + BYN, чтобы Tavily
+                    # нашёл нужные цифры (а не курс к RUB).
+                    low = web_query.lower()
+                    if "курс" in low and any(c in low for c in ["доллар", "евро", "юан", "usd", "eur"]):
+                        if "беларус" not in low and "byn" not in low and "бел руб" not in low:
+                            web_query = f"{web_query} Беларусь BYN nbrb"
                     use_eurotorg_domains = False
                     reason = "fresh_data"
                 elif fresh_promo:
@@ -192,6 +220,18 @@ class Pipeline:
                     web_query = user_message.replace("?", "").strip()
                     use_eurotorg_domains = False
                     reason = "weak_rag_general"
+
+                # ДС №1 п. 2.1.2: обезличивание запроса ПЕРЕД внешним поиском.
+                # rewrite_query мог раскрыть что-то из маскированного входа,
+                # поэтому прогоняем ещё раз. Маскер идемпотентен: [телефон]
+                # на входе остаётся [телефон] на выходе.
+                web_query, web_pii_types = mask_pii(web_query)
+                if web_pii_types:
+                    logger.info(
+                        "pii_masked_web_query",
+                        types=web_pii_types,
+                        count=len(web_pii_types),
+                    )
 
                 web_results = self.web.search(
                     web_query,
@@ -233,7 +273,13 @@ class Pipeline:
                 system, user_message, history=chat_history
             )
 
-            # Save to history
+            # Ответ LLM НЕ маскируется: телефоны магазинов, адреса, ФИО
+            # публичных лиц — публичная информация, должна быть в ответе.
+            # ПДн пользователя физически не могут эхнуться — LLM видела
+            # только замаскированный вход (masked_user_message) и RAG/web.
+
+            # history также хранит маскированный user_message (чтобы в следующих
+            # ходах LLM не получила сырые ПДн из прошлых сообщений).
             self.history.add(user_id, "user", user_message)
             self.history.add(user_id, "assistant", response.text)
 
@@ -250,9 +296,12 @@ class Pipeline:
                 "Извините, произошла временная ошибка. "
                 "Пожалуйста, попробуйте ещё раз через несколько секунд. 🙏"
             )
-            log.error = str(e)
+            # str(e) может содержать эхо user_message из LLM-SDK
+            # (например, «invalid request: …{текст}…»). Маскируем.
+            safe_error, _ = mask_pii(str(e))
+            log.error = safe_error
             log.bot_response = error_msg
             log.response_time_ms = int((time.monotonic() - start_time) * 1000)
             interaction_logger.log_request(log)
-            logger.error("llm_error", user_id=user_id, error=str(e))
+            logger.error("llm_error", user_id=user_id, error=safe_error)
             return error_msg
