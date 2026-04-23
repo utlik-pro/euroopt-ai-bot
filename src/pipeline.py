@@ -3,8 +3,15 @@ import time
 import structlog
 
 from src.filters.content_filter import check_content
-from src.filters.pii_filter import mask_pii
 from src.filters.prompt_sanitizer import build_kb_block, build_web_block
+
+# PII-фильтр выкатывается отдельным релизом (ДС №1). Пока его нет в master —
+# используем no-op stub, чтобы прод работал без маскировки.
+try:
+    from src.filters.pii_filter import mask_pii  # type: ignore
+except ImportError:
+    def mask_pii(text: str) -> tuple[str, list]:
+        return text, []
 from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
 from src.llm.prompts import SYSTEM_PROMPT
 from src.rag.engine import RAGEngine
