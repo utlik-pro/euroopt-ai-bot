@@ -21,6 +21,7 @@ from src.monitoring.logger import interaction_logger, RequestLog
 from src.search.web import get_web_search
 from src.search.query_rewriter import rewrite_query
 from src.search.typo_normalizer import normalize_typos
+from src.search.nbrb import detect_currencies, format_rates_block
 
 logger = structlog.get_logger()
 
@@ -252,10 +253,35 @@ class Pipeline:
                 logger.warning("web_fallback_error", err=str(e))
                 web_results = []
 
+        # Если пользователь спросил про курс валют — подмешиваем в контекст
+        # точные цифры от НБРБ (прямой API, детерминированно).
+        nbrb_block = ""
+        currencies = detect_currencies(user_message)
+        if currencies:
+            try:
+                nbrb_block = format_rates_block(currencies)
+                if nbrb_block:
+                    logger.info("nbrb_rates_added", currencies=currencies)
+            except Exception as e:
+                logger.warning("nbrb_error", err=str(e))
+
         # Контекст собирается через санитайзер: XML-теги + нейтрализация injection
         kb_block = build_kb_block(rag_results)
         web_block = build_web_block(web_results[:3]) if web_results else ""
-        context = kb_block + ("\n\n" + web_block if web_block else "")
+
+        # Собираем <web_context> с NBRB + Tavily (если есть).
+        if nbrb_block or web_block:
+            sources = []
+            if nbrb_block:
+                sources.append(nbrb_block)
+            if web_block:
+                # web_block уже обёрнут в <web_context>...</web_context> — вынимаем содержимое
+                inner = web_block.replace("<web_context>", "").replace("</web_context>", "").strip()
+                if inner:
+                    sources.append(inner)
+            context = kb_block + "\n\n<web_context>\n" + "\n".join(sources) + "\n</web_context>"
+        else:
+            context = kb_block
 
         # Get relevant promotions
         relevant_promos = self.promotions.get_relevant_promotions(user_message)
