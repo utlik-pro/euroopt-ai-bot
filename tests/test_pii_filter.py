@@ -93,6 +93,22 @@ class TestLoyaltyCard:
         masked, types = mask_pii("карта Еплюс №9876543210987")
         assert "card" in types
 
+    def test_non_luhn_card_with_marker(self):
+        """Баг с прода 24.04: тестовая карта не-Luhn с маркером «карта» НЕ маскировалась."""
+        masked, types = mask_pii("Номер моей карты 9897 9663 1133 6755")
+        assert "card" in types, f"Карта с маркером должна маскироваться даже без Luhn: {masked}"
+        assert "9897" not in masked
+        assert "6755" not in masked
+
+    @pytest.mark.parametrize("msg", [
+        "номер карты 1234 5678 9012 3456",            # не-Luhn
+        "картой 0000 1111 2222 3333 оплачу",           # не-Luhn
+        "моя банковская карта 1111-2222-3333-4444",   # не-Luhn, с дефисами
+    ])
+    def test_card_variants_with_marker(self, msg):
+        masked, types = mask_pii(msg)
+        assert "card" in types, f"Не поймано: {msg} → {masked}"
+
 
 class TestPassport:
     @pytest.mark.parametrize("msg", [
