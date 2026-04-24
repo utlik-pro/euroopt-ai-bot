@@ -11,12 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 from src.config import settings
 from src.pipeline import Pipeline
 
-# PII-фильтр выкатывается отдельным релизом — пока stub.
-try:
-    from src.filters.pii_filter import mask_pii  # type: ignore
-except ImportError:
-    def mask_pii(text: str) -> tuple[str, list]:
-        return text, []
+from src.filters.pii_filter import mask_pii
 from src.bot.access import (
     log_access,
     log_message,
