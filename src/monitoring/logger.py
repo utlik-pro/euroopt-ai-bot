@@ -55,6 +55,10 @@ class RequestLog:
     rag_results_count: int = 0
     rag_top_score: float = 0.0
     promotions_shown: int = 0
+    # PII: типы ПДн, найденных во ВХОДЯЩЕМ сообщении пользователя. Значения НЕ
+    # сохраняем — user_message в этом же логе уже маскирован. bot_response идёт
+    # как есть: телефоны магазинов/ФИО публичных лиц — публичная информация.
+    pii_detected_input: list = field(default_factory=list)
     # LLM
     llm_provider: str = ""
     llm_model: str = ""

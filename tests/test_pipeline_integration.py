@@ -83,6 +83,62 @@ class TestPipelineNormalFlow:
         assert "доставк" in system_prompt.lower()
 
 
+class TestPipelinePIIMasking:
+    """ДС №1 к Договору 2703/26-01, п. 2.1.1: данные пользователя не должны
+    попадать в LLM, внешний поиск и логи. Телефоны магазинов, ФИО публичных
+    лиц и прочая публичная информация — остаются в ответах как есть."""
+
+    def test_user_message_masked_before_llm(self, pipeline_with_mock_llm):
+        """В LLM попадает маскированный текст пользователя, не сырой."""
+        asyncio.get_event_loop().run_until_complete(
+            pipeline_with_mock_llm.process(
+                "мой тел +375 29 123-45-67, заказ готов?", user_id=10,
+            )
+        )
+        call_args = pipeline_with_mock_llm.llm.generate.call_args
+        # Второй позиционный аргумент — user_message
+        passed_user_msg = call_args[0][1]
+        assert "375" not in passed_user_msg, f"Сырой телефон ушёл в LLM: {passed_user_msg}"
+        assert "[телефон]" in passed_user_msg
+
+    def test_llm_response_passes_through_unchanged(self):
+        """Ответ LLM с публичными данными (тел. магазина) идёт пользователю КАК ЕСТЬ."""
+        pipeline = Pipeline()
+        pipeline.llm = AsyncMock()
+        pipeline.llm.generate = AsyncMock(return_value=LLMResponse(
+            text="Позвоните на горячую линию +375 17 239 00 00",
+            model="test-model",
+            input_tokens=10, output_tokens=10,
+        ))
+        result = asyncio.get_event_loop().run_until_complete(
+            pipeline.process("где горячая линия?", user_id=11)
+        )
+        # Публичный телефон компании должен дойти до пользователя неизменным.
+        assert "+375 17 239 00 00" in result
+        assert "[телефон]" not in result
+
+    def test_log_has_no_user_pii(self, pipeline_with_mock_llm, tmp_path, monkeypatch):
+        """В JSONL-логе нет сырых ПДн пользователя."""
+        from src.monitoring import logger as logger_mod
+        monkeypatch.setattr(logger_mod, "LOGS_DIR", tmp_path)
+        logger_mod.interaction_logger._get_log_file = lambda: tmp_path / "test.jsonl"
+
+        asyncio.get_event_loop().run_until_complete(
+            pipeline_with_mock_llm.process(
+                "я Иван Петров, email ivan.petrov@mail.ru", user_id=12,
+            )
+        )
+        log_file = tmp_path / "test.jsonl"
+        assert log_file.exists()
+        content = log_file.read_text(encoding="utf-8")
+        # Пользовательские ПДн не должны оказаться в логе
+        assert "ivan.petrov@mail.ru" not in content, "email пользователя в логе!"
+        assert "Иван" not in content, "имя пользователя в логе!"
+        assert "Петров" not in content, "фамилия пользователя в логе!"
+        # Метки типов — есть
+        assert "[email]" in content or "pii_detected_input" in content
+
+
 class TestPipelineErrorHandling:
     def test_handles_llm_error_gracefully(self):
         pipeline = Pipeline()

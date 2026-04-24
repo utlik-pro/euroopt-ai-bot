@@ -3,15 +3,8 @@ import time
 import structlog
 
 from src.filters.content_filter import check_content
+from src.filters.pii_filter import mask_pii
 from src.filters.prompt_sanitizer import build_kb_block, build_web_block
-
-# PII-фильтр выкатывается отдельным релизом (ДС №1). Пока его нет в master —
-# используем no-op stub, чтобы прод работал без маскировки.
-try:
-    from src.filters.pii_filter import mask_pii  # type: ignore
-except ImportError:
-    def mask_pii(text: str) -> tuple[str, list]:
-        return text, []
 from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
 from src.llm.prompts import SYSTEM_PROMPT
 from src.rag.engine import RAGEngine
@@ -120,16 +113,21 @@ class Pipeline:
         Layer 4: LLM generation with chat history
         """
         start_time = time.monotonic()
-        # mask_pii — no-op stub пока PII не выкатывается (отдельный релиз).
+        # ДС №1 к Договору 2703/26-01, п. 2.1.1: в лог user_message пишем УЖЕ
+        # маскированным — сырые ПДн пользователя не должны попадать в JSONL.
         masked_user_message, pii_in_types = mask_pii(user_message)
         log = RequestLog(
             user_id=user_id,
             user_message=masked_user_message,
+            pii_detected_input=pii_in_types,
         )
-        # PII-логирование отключено: stub всегда возвращает пустой pii_in_types.
-        # Когда PII-фильтр будет выкачен, раскомментировать:
-        # if pii_in_types:
-        #     logger.info("pii_detected_input", user_id=user_id, types=pii_in_types, count=len(pii_in_types))
+        if pii_in_types:
+            logger.info(
+                "pii_detected_input",
+                user_id=user_id,
+                types=pii_in_types,
+                count=len(pii_in_types),
+            )
 
         # Layer 1: Content filter (по маскированному тексту — фильтру ПДн не нужны,
         # а заблокированные темы всё равно детектируются по ключевым словам).

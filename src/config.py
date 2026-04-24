@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     web_fallback_min_score: float = Field(default=0.60, env="WEB_FALLBACK_MIN_SCORE")
     enable_query_rewrite: bool = Field(default=True, env="ENABLE_QUERY_REWRITE")
 
+    # PII-фильтр (ДС №1 к Договору 2703/26-01, п. 2.1.1)
+    # NER для ФИО через natasha. False — только regex-слой.
+    pii_use_ner: bool = Field(default=True, env="PII_USE_NER")
+
     def pre_approved_usernames_set(self) -> set[str]:
         return {u.strip().lstrip("@").lower() for u in self.pre_approved_usernames.split(",") if u.strip()}
 
