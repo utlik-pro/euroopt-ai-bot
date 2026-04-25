@@ -25,6 +25,7 @@ from src.canonical import CanonicalMatcher
 from src.router import IntentRouter, Intent, detect_brand, detect_city
 from src.search.query_normalizer import normalize_query
 from src.verify import GroundingVerifier
+from src.promotions.mechanic_detector import MechanicDetector
 
 logger = structlog.get_logger()
 
@@ -42,6 +43,9 @@ GROUNDING_AUTO_FIX = os.environ.get("GROUNDING_AUTO_FIX", "false").lower() == "t
 # Фильтр RAG по бренду/городу (для блока «магазины»). Закрывает 24.04 P1:
 # вопрос про «Евроопт» не должен подмешивать «Хит» и наоборот.
 ENABLE_BRAND_FILTER = os.environ.get("ENABLE_BRAND_FILTER", "false").lower() == "true"
+# Подмешивание описания механики акции в контекст LLM (Еврошок / Цены вниз / 1+1).
+# Закрывает 24.04 P1 «не отличает Еврошок от других механик».
+ENABLE_MECHANIC_CONTEXT = os.environ.get("ENABLE_MECHANIC_CONTEXT", "false").lower() == "true"
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -132,6 +136,7 @@ class Pipeline:
             if ENABLE_GROUNDING_VERIFY
             else None
         )
+        self.mechanic_detector = MechanicDetector() if ENABLE_MECHANIC_CONTEXT else None
 
     async def process(self, user_message: str, user_id: int) -> str:
         """Process user message through the 4-layer pipeline.
@@ -260,6 +265,13 @@ class Pipeline:
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
 
+        # v2 Layer 3a': детектируем конкретную механику акции из вопроса.
+        # Если найдена — потом подмешаем её описание в kb_block, чтобы LLM
+        # не путала Еврошок со «Спеццены», 1+1 с бонусами Еплюс и т.д.
+        detected_mechanic = None
+        if self.mechanic_detector is not None:
+            detected_mechanic = self.mechanic_detector.detect(user_message)
+
         # Layer 3b: Web search — решаем стоит ли идти в Tavily и куда (бренд/общий).
         # Принцип: content-фильтр = единственный запрет; всё остальное — отвечаем
         # полноценно. Web search берём только когда RAG слабый ИЛИ нужна свежесть
@@ -361,6 +373,23 @@ class Pipeline:
         # Контекст собирается через санитайзер: XML-теги + нейтрализация injection
         kb_block = build_kb_block(rag_results)
         web_block = build_web_block(web_results[:3]) if web_results else ""
+
+        # v2: подмешиваем описание упомянутой механики в kb_block — это
+        # каноническое описание из data/promotions/mechanics.json, гарантирует
+        # что LLM не выдумает определение «Еврошока» и не подменит его «Спеццены».
+        if detected_mechanic is not None:
+            mech_block = (
+                f"\n<mechanic_definition id=\"{detected_mechanic.id}\" "
+                f"network=\"{detected_mechanic.network}\">\n"
+                f"{detected_mechanic.format_brief()}\n"
+                f"</mechanic_definition>"
+            )
+            kb_block = kb_block + mech_block
+            logger.info(
+                "mechanic_context_added",
+                id=detected_mechanic.id,
+                name=detected_mechanic.name,
+            )
 
         # Собираем <web_context> с NBRB + Tavily (если есть).
         if nbrb_block or web_block:
