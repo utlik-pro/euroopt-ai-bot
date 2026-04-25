@@ -5,7 +5,11 @@ import structlog
 from src.filters.content_filter import check_content
 from src.filters.pii_filter import mask_pii
 from src.filters.prompt_sanitizer import build_kb_block, build_web_block
-from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
+from src.llm.adapter import (
+    get_llm_provider_with_fallback,
+    GenerationOverrides,
+    LLMResponse,
+)
 from src.llm.prompts import SYSTEM_PROMPT
 from src.rag.engine import RAGEngine
 from src.promotions.engine import PromotionEngine
@@ -16,11 +20,67 @@ from src.search.query_rewriter import rewrite_query
 from src.search.typo_normalizer import normalize_typos
 from src.search.nbrb import detect_currencies, format_rates_block
 
+# v2 quality components — опциональные, включаются флагами env
+from src.canonical import CanonicalMatcher
+from src.router import IntentRouter, Intent, detect_brand, detect_city
+from src.search.query_normalizer import normalize_query
+from src.verify import GroundingVerifier
+from src.promotions.mechanic_detector import MechanicDetector
+from src.cache import ResponseCache
+from src.postprocess import SourceTagger
+
 logger = structlog.get_logger()
 
 ENABLE_REWRITE = os.environ.get("ENABLE_QUERY_REWRITE", "true").lower() == "true"
 WEB_FALLBACK_MIN_RESULTS = int(os.environ.get("WEB_FALLBACK_MIN_RESULTS", "2"))
 WEB_FALLBACK_MIN_SCORE = float(os.environ.get("WEB_FALLBACK_MIN_SCORE", "0.60"))
+
+# v2 quality flags. По умолчанию выключены — старое поведение сохраняется.
+# Включать постепенно в проде через .env, чтобы можно было откатиться.
+ENABLE_CANONICAL = os.environ.get("ENABLE_CANONICAL_ANSWERS", "false").lower() == "true"
+ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "false").lower() == "true"
+ENABLE_QUERY_NORMALIZER = os.environ.get("ENABLE_QUERY_NORMALIZER", "false").lower() == "true"
+ENABLE_GROUNDING_VERIFY = os.environ.get("ENABLE_GROUNDING_VERIFY", "false").lower() == "true"
+GROUNDING_AUTO_FIX = os.environ.get("GROUNDING_AUTO_FIX", "false").lower() == "true"
+# Фильтр RAG по бренду/городу (для блока «магазины»). Закрывает 24.04 P1:
+# вопрос про «Евроопт» не должен подмешивать «Хит» и наоборот.
+ENABLE_BRAND_FILTER = os.environ.get("ENABLE_BRAND_FILTER", "false").lower() == "true"
+# Подмешивание описания механики акции в контекст LLM (Еврошок / Цены вниз / 1+1).
+# Закрывает 24.04 P1 «не отличает Еврошок от других механик».
+ENABLE_MECHANIC_CONTEXT = os.environ.get("ENABLE_MECHANIC_CONTEXT", "false").lower() == "true"
+# Общий кэш ответов «нормализованный вопрос → ответ» с TTL.
+# Закрывает 24.04 P2: одинаковый вопрос → одинаковый ответ.
+# Per-user долговременная память НЕ делается — это нарушение ТЗ §2 (PII).
+ENABLE_RESPONSE_CACHE = os.environ.get("ENABLE_RESPONSE_CACHE", "false").lower() == "true"
+# Маркер источника в ответах на рецепты («📋 Из базы / 🌐 Из интернета»).
+# Закрывает 24.04 P3: «нужна большая прозрачность источника».
+ENABLE_SOURCE_TAGGER = os.environ.get("ENABLE_SOURCE_TAGGER", "false").lower() == "true"
+# Явная PII-рамка в начале ответа на сообщения с обнаруженными ПД.
+# Закрывает 25.04 п. 6.4: «ответ должен начинаться с безопасной рамки
+# "Я не могу обрабатывать персональные данные в чате"».
+ENABLE_PII_FRAME = os.environ.get("ENABLE_PII_FRAME", "false").lower() == "true"
+
+PII_FRAME_PREFIX = (
+    "🔒 Я не могу обрабатывать персональные данные в чате. "
+    "Пожалуйста, не отправляйте номера телефонов, карт, документов, "
+    "адреса и ФИО.\n\n"
+)
+
+
+def _has_pii_frame_signal(text: str) -> bool:
+    """Уже ли в ответе есть PII-рамка в начале."""
+    if not text:
+        return False
+    head = text.lower().lstrip()[:200]
+    return any(
+        sig in head for sig in (
+            "не могу обрабатыв",
+            "не могу принимать",
+            "не могу повторять",
+            "не сохраня",
+            "персональные данные",
+        )
+    )
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -103,6 +163,17 @@ class Pipeline:
         self.promotions = PromotionEngine()
         self.history = ChatHistory(max_messages=20, ttl_minutes=60)
         self.web = get_web_search()
+        # v2 quality components — инициализируем всегда, активируем флагами в process()
+        self.canonical = CanonicalMatcher() if ENABLE_CANONICAL else None
+        self.intent_router = IntentRouter() if ENABLE_INTENT_ROUTER else None
+        self.grounding_verifier = (
+            GroundingVerifier(auto_fix=GROUNDING_AUTO_FIX)
+            if ENABLE_GROUNDING_VERIFY
+            else None
+        )
+        self.mechanic_detector = MechanicDetector() if ENABLE_MECHANIC_CONTEXT else None
+        self.response_cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
+        self.source_tagger = SourceTagger() if ENABLE_SOURCE_TAGGER else None
 
     async def process(self, user_message: str, user_id: int) -> str:
         """Process user message through the 4-layer pipeline.
@@ -146,11 +217,97 @@ class Pipeline:
         # сохраняем и никуда не отправляем.
         user_message = masked_user_message
 
+        # v2 Layer 1.45: Response cache — общий кэш «нормализованный
+        # вопрос → ответ» с TTL=1ч (по умолчанию). На одинаковый вопрос
+        # двух разных пользователей в течение TTL отдаём один и тот же
+        # ответ. Закрывает 24.04 P2 (расхождение Наташа/Лёша).
+        # ВАЖНО: кэш ОБЩИЙ, не привязан к user_id; per-user долговременная
+        # память запрещена ТЗ §2 (PII).
+        if self.response_cache is not None:
+            cached = self.response_cache.get(user_message)
+            if cached is not None:
+                # Если в исходном были ПДн — добавляем PII-рамку и к кэш-хиту тоже
+                cached_out = cached
+                if (
+                    ENABLE_PII_FRAME
+                    and pii_in_types
+                    and not _has_pii_frame_signal(cached_out)
+                ):
+                    cached_out = PII_FRAME_PREFIX + cached_out
+                self.history.add(user_id, "user", user_message)
+                self.history.add(user_id, "assistant", cached_out)
+                log.bot_response = cached_out
+                log.llm_provider = "cache"
+                log.llm_model = "response_cache"
+                log.response_time_ms = int((time.monotonic() - start_time) * 1000)
+                interaction_logger.log_request(log)
+                return cached_out
+
+        # v2 Layer 1.5: Canonical answers — гарантия 100% повторяемости
+        # на критичных FAQ. Если запрос совпадает с известным шаблоном
+        # (вход в ЛК, утеря карты, оплата 99% и т.п.) — отдаём готовый
+        # ответ, минуя RAG/LLM. Это закрывает претензии заказчика по
+        # повторяемости (отчёт 24.04, P2).
+        if self.canonical is not None:
+            canonical_hit = self.canonical.match(user_message)
+            if canonical_hit is not None:
+                answer = canonical_hit.answer
+                # PII-рамка перед каноническим ответом, если в исходном
+                # сообщении были ПД. Заказчик 25.04 п. 6.4.
+                if (
+                    ENABLE_PII_FRAME
+                    and pii_in_types
+                    and not _has_pii_frame_signal(answer)
+                ):
+                    answer = PII_FRAME_PREFIX + answer
+                self.history.add(user_id, "user", user_message)
+                self.history.add(user_id, "assistant", answer)
+                log.bot_response = answer
+                log.llm_provider = "canonical"
+                log.llm_model = canonical_hit.id
+                log.response_time_ms = int((time.monotonic() - start_time) * 1000)
+                interaction_logger.log_request(log)
+                logger.info(
+                    "canonical_answer_served",
+                    user_id=user_id,
+                    canonical_id=canonical_hit.id,
+                    category=canonical_hit.category,
+                )
+                return answer
+
+        # v2 Layer 1.6: Intent routing — определяем тип запроса для адаптивных
+        # параметров генерации (temperature, require_rag, allow_web).
+        intent_result = None
+        if self.intent_router is not None:
+            intent_result = self.intent_router.classify(user_message)
+            logger.info(
+                "intent_classified",
+                user_id=user_id,
+                intent=intent_result.intent.value,
+                confidence=intent_result.confidence,
+                temperature=intent_result.temperature,
+            )
+
         # Layer 2a: нормализация опечаток для search (оригинал user_message не меняем!)
         # «скидкиии» → «скидки», «едаставка» → «едоставка» и т.п.
         normalized = normalize_typos(user_message)
         if normalized != user_message:
             logger.info("typo_normalized", original=user_message[:60], normalized=normalized[:60])
+
+        # v2 Layer 2a': канонизация запроса для повторяемости.
+        # Развёртывание синонимов и сокращений: «ЛК» → «личный кабинет»,
+        # «магазины в Лиде» → «магазины Лида». Разные формулировки одного
+        # и того же вопроса дают одинаковые embeddings → одинаковый ранкинг
+        # → одинаковый ответ. Отчёт 24.04 P2: повторяемость.
+        if ENABLE_QUERY_NORMALIZER:
+            canonized = normalize_query(normalized, strip_stopwords=False)
+            if canonized and canonized != normalized.lower():
+                logger.info(
+                    "query_canonized",
+                    original=normalized[:60],
+                    canonized=canonized[:60],
+                )
+                normalized = canonized
 
         # Layer 2b: Query rewrite (только для коротких запросов)
         search_query = normalized
@@ -160,10 +317,32 @@ class Pipeline:
             except Exception as e:
                 logger.warning("rewrite_skipped", err=str(e))
 
-        # Layer 3a: RAG search
-        rag_results = self.rag.search(search_query)
+        # Layer 3a: RAG search.
+        # v2: для запросов про магазины применяем brand/city фильтр —
+        # «Евроопт» и «Хит» не должны мешаться в одной выдаче.
+        rag_brand: str | None = None
+        rag_city: str | None = None
+        if ENABLE_BRAND_FILTER and intent_result is not None and intent_result.intent == Intent.STORES:
+            rag_brand = detect_brand(user_message)
+            rag_city = detect_city(user_message)
+            if rag_brand or rag_city:
+                logger.info(
+                    "stores_filter",
+                    brand=rag_brand or "any",
+                    city=rag_city or "any",
+                    query=user_message[:60],
+                )
+
+        rag_results = self.rag.search(search_query, brand=rag_brand, city=rag_city)
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
+
+        # v2 Layer 3a': детектируем конкретную механику акции из вопроса.
+        # Если найдена — потом подмешаем её описание в kb_block, чтобы LLM
+        # не путала Еврошок со «Спеццены», 1+1 с бонусами Еплюс и т.д.
+        detected_mechanic = None
+        if self.mechanic_detector is not None:
+            detected_mechanic = self.mechanic_detector.detect(user_message)
 
         # Layer 3b: Web search — решаем стоит ли идти в Tavily и куда (бренд/общий).
         # Принцип: content-фильтр = единственный запрет; всё остальное — отвечаем
@@ -267,6 +446,23 @@ class Pipeline:
         kb_block = build_kb_block(rag_results)
         web_block = build_web_block(web_results[:3]) if web_results else ""
 
+        # v2: подмешиваем описание упомянутой механики в kb_block — это
+        # каноническое описание из data/promotions/mechanics.json, гарантирует
+        # что LLM не выдумает определение «Еврошока» и не подменит его «Спеццены».
+        if detected_mechanic is not None:
+            mech_block = (
+                f"\n<mechanic_definition id=\"{detected_mechanic.id}\" "
+                f"network=\"{detected_mechanic.network}\">\n"
+                f"{detected_mechanic.format_brief()}\n"
+                f"</mechanic_definition>"
+            )
+            kb_block = kb_block + mech_block
+            logger.info(
+                "mechanic_context_added",
+                id=detected_mechanic.id,
+                name=detected_mechanic.name,
+            )
+
         # Собираем <web_context> с NBRB + Tavily (если есть).
         if nbrb_block or web_block:
             sources = []
@@ -294,20 +490,89 @@ class Pipeline:
         # Get chat history for this user
         chat_history = self.history.get(user_id)
 
-        try:
-            response: LLMResponse = await self.llm.generate(
-                system, user_message, history=chat_history
+        # v2: подбираем overrides на основе intent — фактологические запросы
+        # получают temperature=0.0 (детерминизм + повторяемость), творческие
+        # (рецепты, smalltalk) — повыше. Если intent_router выключен — None,
+        # тогда адаптер использует settings.llm_temperature.
+        gen_overrides: GenerationOverrides | None = None
+        if intent_result is not None:
+            gen_overrides = GenerationOverrides(
+                temperature=intent_result.temperature,
+                # seed для повторяемости (поддерживается DeepSeek/OpenAI)
+                seed=42 if intent_result.deterministic else None,
             )
+
+        try:
+            # Сигнатуру вызова сохраняем минимальной (history был и раньше,
+            # overrides добавляем только когда intent_router реально что-то
+            # вернул) — это не ломает старые тесты с моками LLM.
+            if gen_overrides is not None:
+                response: LLMResponse = await self.llm.generate(
+                    system, user_message, history=chat_history, overrides=gen_overrides,
+                )
+            else:
+                response = await self.llm.generate(
+                    system, user_message, history=chat_history,
+                )
+
+            # v2: Grounding verify — после генерации проверяем, не появилось ли
+            # в ответе фактов (телефонов, цен, времени), которых нет в источниках.
+            # При auto_fix=True заменяем безопасными формулировками.
+            if self.grounding_verifier is not None:
+                vr = self.grounding_verifier.verify(
+                    response.text, kb_text=kb_block, web_text=web_block,
+                )
+                if not vr.is_grounded:
+                    log.filter_reason = (
+                        f"grounding:{','.join(sorted({i.kind for i in vr.issues}))}"
+                    )
+                    if GROUNDING_AUTO_FIX and vr.cleaned_text and vr.cleaned_text != response.text:
+                        logger.info(
+                            "grounding_auto_fixed",
+                            user_id=user_id,
+                            issues=len(vr.issues),
+                        )
+                        response.text = vr.cleaned_text
 
             # Ответ LLM НЕ маскируется: телефоны магазинов, адреса, ФИО
             # публичных лиц — публичная информация, должна быть в ответе.
             # ПДн пользователя физически не могут эхнуться — LLM видела
             # только замаскированный вход (masked_user_message) и RAG/web.
 
+            # v2: PII-рамка в начале ответа LLM, если во входе были ПД.
+            # Закрывает 25.04 п. 6.4 «явно показывать срабатывание PII-фильтра».
+            if (
+                ENABLE_PII_FRAME
+                and pii_in_types
+                and not _has_pii_frame_signal(response.text)
+            ):
+                response.text = PII_FRAME_PREFIX + response.text
+
+            # v2: маркер источника для рецептов — пользователь видит,
+            # пришёл ответ из базы Евроопта или из общего интернета.
+            # Применяется только для intent=RECIPES, чтобы не загромождать
+            # FAQ/Stores/Promo (там источники и так строгие).
+            if (
+                self.source_tagger is not None
+                and intent_result is not None
+                and intent_result.intent == Intent.RECIPES
+            ):
+                tag_result = self.source_tagger.tag(
+                    response.text,
+                    rag_results=rag_results,
+                    web_results=web_results,
+                )
+                response.text = tag_result.text
+
             # history также хранит маскированный user_message (чтобы в следующих
             # ходах LLM не получила сырые ПДн из прошлых сообщений).
             self.history.add(user_id, "user", user_message)
             self.history.add(user_id, "assistant", response.text)
+
+            # v2: кладём в общий кэш для повторяемости. PII-сообщения и
+            # запросы с временными маркерами кэш сам пропустит.
+            if self.response_cache is not None:
+                self.response_cache.put(user_message, response.text)
 
             log.bot_response = response.text
             log.llm_provider = type(self.llm).__name__

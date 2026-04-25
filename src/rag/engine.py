@@ -1,9 +1,12 @@
-"""Hybrid RAG: ChromaDB (e5 embeddings) + BM25 keyword search.
+"""Hybrid RAG: ChromaDB (e5 embeddings) + BM25 keyword search + опц. re-ranker.
 
 - e5 модель добавляет префиксы 'query:' / 'passage:' для лучшего матчинга
 - BM25 параллельно ищет по ключевым словам — спасает короткие FAQ-запросы
 - Финальный score = 0.6 * embedding + 0.4 * BM25 (нормализованные)
+- Если ENABLE_RERANKER=true — top-K результатов прогоняются через re-ranker
+  (lite или cross-encoder) для точной финальной сортировки.
 """
+import os
 import re
 import chromadb
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
@@ -12,8 +15,15 @@ import structlog
 from rank_bm25 import BM25Okapi
 
 from src.config import settings
+from src.rag.reranker import get_reranker
 
 logger = structlog.get_logger()
+
+ENABLE_RERANKER = os.environ.get("ENABLE_RERANKER", "false").lower() == "true"
+# "lite" — без зависимостей; "cross-encoder" — нужна модель ~300МБ
+RERANKER_MODE = os.environ.get("RERANKER_MODE", "lite").lower()
+# Сколько кандидатов берём в RAG ДО re-rank (re-rank только лучших top_K финально)
+RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 
 
 def _tokenize(text: str) -> list[str]:
@@ -67,7 +77,14 @@ class RAGEngine:
         self._bm25_ids: list[str] = []
         self._bm25_texts: list[str] = []
         self._bm25_metas: list[dict] = []
-        logger.info("rag_engine_initialized", persist_dir=settings.chroma_persist_dir)
+        # Lazy: cross-encoder инициализируется при первом запросе, lite — сразу.
+        self._reranker = get_reranker(RERANKER_MODE) if ENABLE_RERANKER else None
+        logger.info(
+            "rag_engine_initialized",
+            persist_dir=settings.chroma_persist_dir,
+            reranker_enabled=ENABLE_RERANKER,
+            reranker_mode=RERANKER_MODE if ENABLE_RERANKER else "off",
+        )
 
     def _build_bm25(self) -> None:
         all_data = self.collection.get()
@@ -141,12 +158,32 @@ class RAGEngine:
             })
         return out
 
-    def search(self, query: str, n_results: int | None = None, category: str | None = None) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        n_results: int | None = None,
+        category: str | None = None,
+        brand: str | None = None,
+        city: str | None = None,
+    ) -> list[dict]:
+        """Гибридный поиск с опциональной фильтрацией по metadata.
+
+        Args:
+            query: текст запроса.
+            n_results: сколько результатов вернуть (по умолчанию из settings).
+            category: фильтр по категории (faq | recipe | store | promotion).
+            brand: фильтр по бренду магазина (Евроопт | Хит | Грошык).
+                Применяется ТОЛЬКО к документам category=store.
+                FAQ/рецепты остаются в выдаче независимо от бренда.
+                Закрывает претензию 24.04 P1: вопрос про «Евроопт» не должен
+                подмешивать «Хит» и наоборот.
+            city: фильтр по городу для магазинов.
+        """
         n = n_results or settings.rag_top_k
 
         # Берём с запасом из обоих источников
-        emb_hits = self._search_embedding(query, n=max(n * 2, 8))
-        bm25_hits = self._search_bm25(query, n=max(n * 2, 8))
+        emb_hits = self._search_embedding(query, n=max(n * 3, 12))
+        bm25_hits = self._search_bm25(query, n=max(n * 3, 12))
 
         # Объединяем по id
         merged: dict[str, dict] = {}
@@ -168,15 +205,63 @@ class RAGEngine:
         if category:
             ranked = [h for h in ranked if (h.get("metadata") or {}).get("category") == category]
 
+        # Бренд-фильтр (применяется только к магазинам).
+        # FAQ/рецепты не имеют поля brand → проходят свободно.
+        if brand:
+            brand_low = brand.lower()
+            def _brand_ok(h: dict) -> bool:
+                meta = h.get("metadata") or {}
+                if meta.get("category") != "store":
+                    return True  # не магазин — не фильтруем
+                return (meta.get("brand") or "").lower() == brand_low
+            before = len(ranked)
+            ranked = [h for h in ranked if _brand_ok(h)]
+            logger.info("brand_filter_applied", brand=brand, before=before, after=len(ranked))
+
+        # Город-фильтр (только для магазинов; нечувствителен к падежам в данных
+        # уже после нормализации запроса)
+        if city:
+            city_low = city.lower()
+            def _city_ok(h: dict) -> bool:
+                meta = h.get("metadata") or {}
+                if meta.get("category") != "store":
+                    return True
+                return city_low in (meta.get("city") or "").lower()
+            ranked = [h for h in ranked if _city_ok(h)]
+
         # Порог
         thr = settings.rag_score_threshold
-        result = [h for h in ranked if h["score"] >= thr][:n]
+        filtered = [h for h in ranked if h["score"] >= thr]
+
+        # Re-rank: берём top-K кандидатов и пересортируем точнее
+        if self._reranker is not None and filtered:
+            candidates = filtered[:RERANK_CANDIDATES]
+            try:
+                reranked = self._reranker.rerank(query, candidates, top_k=n)
+                # Тех, кого re-ranker не вернул, оставляем в хвосте оригинального порядка
+                reranked_ids = {h["id"] for h in reranked}
+                tail = [h for h in filtered if h["id"] not in reranked_ids]
+                result = (reranked + tail)[:n]
+                logger.info(
+                    "rag_reranked",
+                    query=query[:50],
+                    candidates=len(candidates),
+                    final=len(result),
+                    method=type(self._reranker).__name__,
+                )
+            except Exception as e:
+                logger.warning("rerank_failed", err=str(e))
+                result = filtered[:n]
+        else:
+            result = filtered[:n]
 
         logger.info("rag_search",
                     query=query[:50],
                     emb_hits=len(emb_hits),
                     bm25_hits=len(bm25_hits),
-                    after_threshold=len(result))
+                    after_threshold=len(result),
+                    brand=brand or "any",
+                    city=city or "any")
         return result
 
     def get_stats(self) -> dict:
