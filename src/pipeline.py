@@ -55,6 +55,32 @@ ENABLE_RESPONSE_CACHE = os.environ.get("ENABLE_RESPONSE_CACHE", "false").lower()
 # Маркер источника в ответах на рецепты («📋 Из базы / 🌐 Из интернета»).
 # Закрывает 24.04 P3: «нужна большая прозрачность источника».
 ENABLE_SOURCE_TAGGER = os.environ.get("ENABLE_SOURCE_TAGGER", "false").lower() == "true"
+# Явная PII-рамка в начале ответа на сообщения с обнаруженными ПД.
+# Закрывает 25.04 п. 6.4: «ответ должен начинаться с безопасной рамки
+# "Я не могу обрабатывать персональные данные в чате"».
+ENABLE_PII_FRAME = os.environ.get("ENABLE_PII_FRAME", "false").lower() == "true"
+
+PII_FRAME_PREFIX = (
+    "🔒 Я не могу обрабатывать персональные данные в чате. "
+    "Пожалуйста, не отправляйте номера телефонов, карт, документов, "
+    "адреса и ФИО.\n\n"
+)
+
+
+def _has_pii_frame_signal(text: str) -> bool:
+    """Уже ли в ответе есть PII-рамка в начале."""
+    if not text:
+        return False
+    head = text.lower().lstrip()[:200]
+    return any(
+        sig in head for sig in (
+            "не могу обрабатыв",
+            "не могу принимать",
+            "не могу повторять",
+            "не сохраня",
+            "персональные данные",
+        )
+    )
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -200,14 +226,22 @@ class Pipeline:
         if self.response_cache is not None:
             cached = self.response_cache.get(user_message)
             if cached is not None:
+                # Если в исходном были ПДн — добавляем PII-рамку и к кэш-хиту тоже
+                cached_out = cached
+                if (
+                    ENABLE_PII_FRAME
+                    and pii_in_types
+                    and not _has_pii_frame_signal(cached_out)
+                ):
+                    cached_out = PII_FRAME_PREFIX + cached_out
                 self.history.add(user_id, "user", user_message)
-                self.history.add(user_id, "assistant", cached)
-                log.bot_response = cached
+                self.history.add(user_id, "assistant", cached_out)
+                log.bot_response = cached_out
                 log.llm_provider = "cache"
                 log.llm_model = "response_cache"
                 log.response_time_ms = int((time.monotonic() - start_time) * 1000)
                 interaction_logger.log_request(log)
-                return cached
+                return cached_out
 
         # v2 Layer 1.5: Canonical answers — гарантия 100% повторяемости
         # на критичных FAQ. Если запрос совпадает с известным шаблоном
@@ -217,9 +251,18 @@ class Pipeline:
         if self.canonical is not None:
             canonical_hit = self.canonical.match(user_message)
             if canonical_hit is not None:
+                answer = canonical_hit.answer
+                # PII-рамка перед каноническим ответом, если в исходном
+                # сообщении были ПД. Заказчик 25.04 п. 6.4.
+                if (
+                    ENABLE_PII_FRAME
+                    and pii_in_types
+                    and not _has_pii_frame_signal(answer)
+                ):
+                    answer = PII_FRAME_PREFIX + answer
                 self.history.add(user_id, "user", user_message)
-                self.history.add(user_id, "assistant", canonical_hit.answer)
-                log.bot_response = canonical_hit.answer
+                self.history.add(user_id, "assistant", answer)
+                log.bot_response = answer
                 log.llm_provider = "canonical"
                 log.llm_model = canonical_hit.id
                 log.response_time_ms = int((time.monotonic() - start_time) * 1000)
@@ -230,7 +273,7 @@ class Pipeline:
                     canonical_id=canonical_hit.id,
                     category=canonical_hit.category,
                 )
-                return canonical_hit.answer
+                return answer
 
         # v2 Layer 1.6: Intent routing — определяем тип запроса для адаптивных
         # параметров генерации (temperature, require_rag, allow_web).
@@ -495,6 +538,15 @@ class Pipeline:
             # публичных лиц — публичная информация, должна быть в ответе.
             # ПДн пользователя физически не могут эхнуться — LLM видела
             # только замаскированный вход (masked_user_message) и RAG/web.
+
+            # v2: PII-рамка в начале ответа LLM, если во входе были ПД.
+            # Закрывает 25.04 п. 6.4 «явно показывать срабатывание PII-фильтра».
+            if (
+                ENABLE_PII_FRAME
+                and pii_in_types
+                and not _has_pii_frame_signal(response.text)
+            ):
+                response.text = PII_FRAME_PREFIX + response.text
 
             # v2: маркер источника для рецептов — пользователь видит,
             # пришёл ответ из базы Евроопта или из общего интернета.

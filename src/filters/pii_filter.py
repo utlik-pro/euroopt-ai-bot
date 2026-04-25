@@ -85,6 +85,18 @@ _PHONE_INTL = re.compile(
 _EMAIL = re.compile(
     r"\b[A-Za-z0-9][A-Za-z0-9._%+\-]{0,63}@[A-Za-z0-9][A-Za-z0-9\-]{0,62}(?:\.[A-Za-z0-9\-]{1,62}){1,3}\b"
 )
+# Маскированный email: «test [точка] user [собака] mail [точка] com»,
+# «testточкаuserсобакаmailточкаcom», «test dot user at mail dot com».
+# Закрывает претензию 25.04: бот помогал нормализовать такие email вместо
+# отказа от обработки. Детектируем — маскируем — отказ.
+_EMAIL_MASKED = re.compile(
+    r"\b[A-Za-z0-9._\-]{1,64}"
+    r"\s*(?:\[\s*собак[аи]\s*\]|собака|\(?\s*at\s*\)?|\[at\])\s*"
+    r"[A-Za-z0-9\-]{1,64}"
+    r"(?:\s*(?:\[\s*точк[аи]\s*\]|точка|\(?\s*dot\s*\)?|\[dot\])\s*"
+    r"[A-Za-z0-9\-]{1,32}){1,3}\b",
+    re.IGNORECASE | re.UNICODE,
+)
 
 # Банковские карты: 13–19 цифр, сгруппированные пробелами/дефисами или сплошные.
 # Проверяем Luhn, чтобы не маскировать случайные числа (дата, артикул).
@@ -185,6 +197,17 @@ _FIO_STOPWORDS = {
     "мария", "анастасия",  # часто встречаются как слова-нарицательные
 }
 
+# Корни брендов/топонимов — для падежных форм (евроопта/евроопту/евроопте).
+# Если хоть один токен NER-spana начинается с одного из корней — это бренд,
+# не ФИО.
+_FIO_STOPWORD_PREFIXES = (
+    "евроопт", "евроторг", "белхард", "грошык", "дискаунт",
+    "еплюс", "ямигом", "едоставк",
+    "минск", "менск", "гомел", "брест", "витебск", "гродн", "могил",
+    "беларус", "лида", "лиды", "лиде", "лиду", "борисов", "орша",
+    "молодечн", "солигорск", "мозыр", "пинск", "кобрин",
+)
+
 
 # ==================== NER (natasha) — ленивая инициализация ====================
 
@@ -233,9 +256,18 @@ def _ner_find_fio(text: str) -> list[tuple[int, int]]:
                 continue
             if (span.stop - span.start) < _NER_MIN_LEN:
                 continue
-            # Отсеиваем бренды/топонимы Евроторга — иногда NER путается.
+            # Отсеиваем бренды/топонимы Евроторга — иногда NER путается
+            # и принимает «Евроопта», «Минске» за ФИО. Учитываем падежи
+            # через префикс-матч.
             low = span.text.lower().strip()
-            if any(sw in low.split() for sw in _FIO_STOPWORDS):
+            tokens = low.split()
+            if any(sw in tokens for sw in _FIO_STOPWORDS):
+                continue
+            if any(
+                t.startswith(prefix)
+                for t in tokens
+                for prefix in _FIO_STOPWORD_PREFIXES
+            ):
                 continue
             spans.append((span.start, span.stop))
         return spans
@@ -303,6 +335,12 @@ def detect_pii(text: str) -> list[PIIMatch]:
 
     # 2. Email
     for m in _EMAIL.finditer(text):
+        add("email", m.start(), m.end())
+    # Маскированный email («[точка]/[собака]» и т.п.): тоже считаем email,
+    # но не накрываем уже найденный обычный email. Заменяет «[email]».
+    for m in _EMAIL_MASKED.finditer(text):
+        if any(mm.type == "email" and mm.start <= m.start() < mm.end for mm in matches):
+            continue
         add("email", m.start(), m.end())
 
     # 3. Паспорт по маркеру (группа — сам номер, но маскируем всё вместе).

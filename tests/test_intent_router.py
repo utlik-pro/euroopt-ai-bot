@@ -74,8 +74,11 @@ def test_delivery():
 def test_factual_intents_are_deterministic():
     """Все фактологические интенты должны иметь temperature 0.0–0.1."""
     r = _r()
+    # «оплата бонусами Еплюс» — это процедурный FAQ-вопрос («как оплатить»),
+    # а не общая информация о программе → правильнее FAQ-интент.
+    # Все четыре — фактологические, low-temperature.
     factual_queries = [
-        ("оплата бонусами Еплюс", Intent.EPLUS),
+        ("оплата бонусами Еплюс", Intent.FAQ),
         ("какие сегодня акции", Intent.PROMOTIONS),
         ("курс евро", Intent.CURRENCY),
         ("адрес магазина в Лиде", Intent.STORES),
