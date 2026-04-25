@@ -26,6 +26,7 @@ from src.router import IntentRouter, Intent, detect_brand, detect_city
 from src.search.query_normalizer import normalize_query
 from src.verify import GroundingVerifier
 from src.promotions.mechanic_detector import MechanicDetector
+from src.cache import ResponseCache
 
 logger = structlog.get_logger()
 
@@ -46,6 +47,10 @@ ENABLE_BRAND_FILTER = os.environ.get("ENABLE_BRAND_FILTER", "false").lower() == 
 # Подмешивание описания механики акции в контекст LLM (Еврошок / Цены вниз / 1+1).
 # Закрывает 24.04 P1 «не отличает Еврошок от других механик».
 ENABLE_MECHANIC_CONTEXT = os.environ.get("ENABLE_MECHANIC_CONTEXT", "false").lower() == "true"
+# Общий кэш ответов «нормализованный вопрос → ответ» с TTL.
+# Закрывает 24.04 P2: одинаковый вопрос → одинаковый ответ.
+# Per-user долговременная память НЕ делается — это нарушение ТЗ §2 (PII).
+ENABLE_RESPONSE_CACHE = os.environ.get("ENABLE_RESPONSE_CACHE", "false").lower() == "true"
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -137,6 +142,7 @@ class Pipeline:
             else None
         )
         self.mechanic_detector = MechanicDetector() if ENABLE_MECHANIC_CONTEXT else None
+        self.response_cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
 
     async def process(self, user_message: str, user_id: int) -> str:
         """Process user message through the 4-layer pipeline.
@@ -179,6 +185,24 @@ class Pipeline:
         # (LLM, web search). Оригинал пользователь видит у себя, мы его нигде не
         # сохраняем и никуда не отправляем.
         user_message = masked_user_message
+
+        # v2 Layer 1.45: Response cache — общий кэш «нормализованный
+        # вопрос → ответ» с TTL=1ч (по умолчанию). На одинаковый вопрос
+        # двух разных пользователей в течение TTL отдаём один и тот же
+        # ответ. Закрывает 24.04 P2 (расхождение Наташа/Лёша).
+        # ВАЖНО: кэш ОБЩИЙ, не привязан к user_id; per-user долговременная
+        # память запрещена ТЗ §2 (PII).
+        if self.response_cache is not None:
+            cached = self.response_cache.get(user_message)
+            if cached is not None:
+                self.history.add(user_id, "user", user_message)
+                self.history.add(user_id, "assistant", cached)
+                log.bot_response = cached
+                log.llm_provider = "cache"
+                log.llm_model = "response_cache"
+                log.response_time_ms = int((time.monotonic() - start_time) * 1000)
+                interaction_logger.log_request(log)
+                return cached
 
         # v2 Layer 1.5: Canonical answers — гарантия 100% повторяемости
         # на критичных FAQ. Если запрос совпадает с известным шаблоном
@@ -471,6 +495,11 @@ class Pipeline:
             # ходах LLM не получила сырые ПДн из прошлых сообщений).
             self.history.add(user_id, "user", user_message)
             self.history.add(user_id, "assistant", response.text)
+
+            # v2: кладём в общий кэш для повторяемости. PII-сообщения и
+            # запросы с временными маркерами кэш сам пропустит.
+            if self.response_cache is not None:
+                self.response_cache.put(user_message, response.text)
 
             log.bot_response = response.text
             log.llm_provider = type(self.llm).__name__
