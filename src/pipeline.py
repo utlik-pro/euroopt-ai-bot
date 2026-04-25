@@ -27,6 +27,7 @@ from src.search.query_normalizer import normalize_query
 from src.verify import GroundingVerifier
 from src.promotions.mechanic_detector import MechanicDetector
 from src.cache import ResponseCache
+from src.postprocess import SourceTagger
 
 logger = structlog.get_logger()
 
@@ -51,6 +52,9 @@ ENABLE_MECHANIC_CONTEXT = os.environ.get("ENABLE_MECHANIC_CONTEXT", "false").low
 # Закрывает 24.04 P2: одинаковый вопрос → одинаковый ответ.
 # Per-user долговременная память НЕ делается — это нарушение ТЗ §2 (PII).
 ENABLE_RESPONSE_CACHE = os.environ.get("ENABLE_RESPONSE_CACHE", "false").lower() == "true"
+# Маркер источника в ответах на рецепты («📋 Из базы / 🌐 Из интернета»).
+# Закрывает 24.04 P3: «нужна большая прозрачность источника».
+ENABLE_SOURCE_TAGGER = os.environ.get("ENABLE_SOURCE_TAGGER", "false").lower() == "true"
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -143,6 +147,7 @@ class Pipeline:
         )
         self.mechanic_detector = MechanicDetector() if ENABLE_MECHANIC_CONTEXT else None
         self.response_cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
+        self.source_tagger = SourceTagger() if ENABLE_SOURCE_TAGGER else None
 
     async def process(self, user_message: str, user_id: int) -> str:
         """Process user message through the 4-layer pipeline.
@@ -490,6 +495,22 @@ class Pipeline:
             # публичных лиц — публичная информация, должна быть в ответе.
             # ПДн пользователя физически не могут эхнуться — LLM видела
             # только замаскированный вход (masked_user_message) и RAG/web.
+
+            # v2: маркер источника для рецептов — пользователь видит,
+            # пришёл ответ из базы Евроопта или из общего интернета.
+            # Применяется только для intent=RECIPES, чтобы не загромождать
+            # FAQ/Stores/Promo (там источники и так строгие).
+            if (
+                self.source_tagger is not None
+                and intent_result is not None
+                and intent_result.intent == Intent.RECIPES
+            ):
+                tag_result = self.source_tagger.tag(
+                    response.text,
+                    rag_results=rag_results,
+                    web_results=web_results,
+                )
+                response.text = tag_result.text
 
             # history также хранит маскированный user_message (чтобы в следующих
             # ходах LLM не получила сырые ПДн из прошлых сообщений).
