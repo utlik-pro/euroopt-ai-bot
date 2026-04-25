@@ -22,7 +22,7 @@ from src.search.nbrb import detect_currencies, format_rates_block
 
 # v2 quality components — опциональные, включаются флагами env
 from src.canonical import CanonicalMatcher
-from src.router import IntentRouter, Intent
+from src.router import IntentRouter, Intent, detect_brand, detect_city
 from src.search.query_normalizer import normalize_query
 from src.verify import GroundingVerifier
 
@@ -39,6 +39,9 @@ ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "false").lower() =
 ENABLE_QUERY_NORMALIZER = os.environ.get("ENABLE_QUERY_NORMALIZER", "false").lower() == "true"
 ENABLE_GROUNDING_VERIFY = os.environ.get("ENABLE_GROUNDING_VERIFY", "false").lower() == "true"
 GROUNDING_AUTO_FIX = os.environ.get("GROUNDING_AUTO_FIX", "false").lower() == "true"
+# Фильтр RAG по бренду/городу (для блока «магазины»). Закрывает 24.04 P1:
+# вопрос про «Евроопт» не должен подмешивать «Хит» и наоборот.
+ENABLE_BRAND_FILTER = os.environ.get("ENABLE_BRAND_FILTER", "false").lower() == "true"
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -237,8 +240,23 @@ class Pipeline:
             except Exception as e:
                 logger.warning("rewrite_skipped", err=str(e))
 
-        # Layer 3a: RAG search
-        rag_results = self.rag.search(search_query)
+        # Layer 3a: RAG search.
+        # v2: для запросов про магазины применяем brand/city фильтр —
+        # «Евроопт» и «Хит» не должны мешаться в одной выдаче.
+        rag_brand: str | None = None
+        rag_city: str | None = None
+        if ENABLE_BRAND_FILTER and intent_result is not None and intent_result.intent == Intent.STORES:
+            rag_brand = detect_brand(user_message)
+            rag_city = detect_city(user_message)
+            if rag_brand or rag_city:
+                logger.info(
+                    "stores_filter",
+                    brand=rag_brand or "any",
+                    city=rag_city or "any",
+                    query=user_message[:60],
+                )
+
+        rag_results = self.rag.search(search_query, brand=rag_brand, city=rag_city)
         log.rag_results_count = len(rag_results)
         log.rag_top_score = rag_results[0]["score"] if rag_results else 0.0
 

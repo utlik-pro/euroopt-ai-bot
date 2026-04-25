@@ -141,12 +141,32 @@ class RAGEngine:
             })
         return out
 
-    def search(self, query: str, n_results: int | None = None, category: str | None = None) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        n_results: int | None = None,
+        category: str | None = None,
+        brand: str | None = None,
+        city: str | None = None,
+    ) -> list[dict]:
+        """Гибридный поиск с опциональной фильтрацией по metadata.
+
+        Args:
+            query: текст запроса.
+            n_results: сколько результатов вернуть (по умолчанию из settings).
+            category: фильтр по категории (faq | recipe | store | promotion).
+            brand: фильтр по бренду магазина (Евроопт | Хит | Грошык).
+                Применяется ТОЛЬКО к документам category=store.
+                FAQ/рецепты остаются в выдаче независимо от бренда.
+                Закрывает претензию 24.04 P1: вопрос про «Евроопт» не должен
+                подмешивать «Хит» и наоборот.
+            city: фильтр по городу для магазинов.
+        """
         n = n_results or settings.rag_top_k
 
         # Берём с запасом из обоих источников
-        emb_hits = self._search_embedding(query, n=max(n * 2, 8))
-        bm25_hits = self._search_bm25(query, n=max(n * 2, 8))
+        emb_hits = self._search_embedding(query, n=max(n * 3, 12))
+        bm25_hits = self._search_bm25(query, n=max(n * 3, 12))
 
         # Объединяем по id
         merged: dict[str, dict] = {}
@@ -168,6 +188,30 @@ class RAGEngine:
         if category:
             ranked = [h for h in ranked if (h.get("metadata") or {}).get("category") == category]
 
+        # Бренд-фильтр (применяется только к магазинам).
+        # FAQ/рецепты не имеют поля brand → проходят свободно.
+        if brand:
+            brand_low = brand.lower()
+            def _brand_ok(h: dict) -> bool:
+                meta = h.get("metadata") or {}
+                if meta.get("category") != "store":
+                    return True  # не магазин — не фильтруем
+                return (meta.get("brand") or "").lower() == brand_low
+            before = len(ranked)
+            ranked = [h for h in ranked if _brand_ok(h)]
+            logger.info("brand_filter_applied", brand=brand, before=before, after=len(ranked))
+
+        # Город-фильтр (только для магазинов; нечувствителен к падежам в данных
+        # уже после нормализации запроса)
+        if city:
+            city_low = city.lower()
+            def _city_ok(h: dict) -> bool:
+                meta = h.get("metadata") or {}
+                if meta.get("category") != "store":
+                    return True
+                return city_low in (meta.get("city") or "").lower()
+            ranked = [h for h in ranked if _city_ok(h)]
+
         # Порог
         thr = settings.rag_score_threshold
         result = [h for h in ranked if h["score"] >= thr][:n]
@@ -176,7 +220,9 @@ class RAGEngine:
                     query=query[:50],
                     emb_hits=len(emb_hits),
                     bm25_hits=len(bm25_hits),
-                    after_threshold=len(result))
+                    after_threshold=len(result),
+                    brand=brand or "any",
+                    city=city or "any")
         return result
 
     def get_stats(self) -> dict:

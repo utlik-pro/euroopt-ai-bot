@@ -71,28 +71,88 @@ def load_recipes(rag: RAGEngine):
 
 
 def load_stores(rag: RAGEngine):
-    """Load store information into RAG."""
+    """Load store information into RAG.
+
+    Поддерживает два формата:
+    1. all_stores.json — основной справочник (1040 магазинов из xlsx Евроторга)
+       с полями: brand (Евроопт/Хит), format (Маркет/Супер/Гипер/Хит Стандарт/
+       Хит-Экспресс/Автолавка/Минимаркет), city, address.
+       В RAG metadata кладётся brand для жёсткой фильтрации в search.
+
+    2. euroopt.json (legacy) — старый формат с name/address/hours/network.
+       Используется как дополнение, если там есть данные не из xlsx.
+    """
     stores_dir = DATA_DIR / "stores"
     documents = []
 
     for file in stores_dir.glob("*.json"):
         items = load_json_data(file)
         for i, item in enumerate(items):
-            name = item.get("name", "")
-            address = item.get("address", "")
-            hours = item.get("hours", "")
-            network = item.get("network", "")
+            # Новый формат (all_stores.json): brand/format/city/address
+            if "brand" in item and "format" in item:
+                brand = item.get("brand", "Евроопт")
+                fmt = item.get("format", "Магазин")
+                city = item.get("city", "")
+                address = item.get("address", "")
+                hours = item.get("hours", "")  # пока нет в xlsx
 
-            text = f"Магазин: {name}\nАдрес: {address}\nРежим работы: {hours}\nСеть: {network}"
-            documents.append({
-                "id": f"store_{file.stem}_{i}",
-                "text": text,
-                "metadata": {"category": "store", "network": network, "source": file.name},
-            })
+                # Текст для поиска: бренд и формат явно вписаны, чтобы
+                # запросы вида «Хит в Минске» матчились через BM25.
+                lines = [
+                    f"Магазин сети {brand}",
+                    f"Формат: {fmt}",
+                    f"Город: {city}",
+                    f"Адрес: {address}",
+                ]
+                if hours:
+                    lines.append(f"Режим работы: {hours}")
+                text = "\n".join(lines)
+
+                documents.append({
+                    "id": f"store_v2_{item.get('id', i)}",
+                    "text": text,
+                    "metadata": {
+                        "category": "store",
+                        "brand": brand,
+                        "format": fmt,
+                        "city": city,
+                        "source": file.name,
+                    },
+                })
+            else:
+                # Legacy формат (euroopt.json): name/address/hours/network
+                name = item.get("name", "")
+                address = item.get("address", "")
+                hours = item.get("hours", "")
+                network = item.get("network", "Евроопт")
+                city = item.get("city", "")
+
+                text = f"Магазин: {name}\nАдрес: {address}"
+                if city:
+                    text += f"\nГород: {city}"
+                if hours:
+                    text += f"\nРежим работы: {hours}"
+                text += f"\nСеть: {network}"
+
+                documents.append({
+                    "id": f"store_{file.stem}_{i}",
+                    "text": text,
+                    "metadata": {
+                        "category": "store",
+                        "brand": network or "Евроопт",
+                        "city": city,
+                        "source": file.name,
+                    },
+                })
 
     if documents:
         rag.add_documents(documents)
-        logger.info("stores_loaded", count=len(documents))
+        # Статистика: сколько по каждому бренду
+        by_brand: dict[str, int] = {}
+        for d in documents:
+            b = d["metadata"].get("brand", "?")
+            by_brand[b] = by_brand.get(b, 0) + 1
+        logger.info("stores_loaded", count=len(documents), by_brand=by_brand)
 
 
 def load_all():
