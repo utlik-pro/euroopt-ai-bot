@@ -71,9 +71,41 @@ class LLMResponse:
     output_tokens: int
 
 
+@dataclass
+class GenerationOverrides:
+    """Опциональные override-параметры для конкретного вызова.
+
+    Используются Intent Router'ом: для фактических запросов temperature=0.0,
+    для творческих — выше. seed (где провайдер поддерживает) даёт ещё чуть
+    больше воспроизводимости.
+    """
+
+    temperature: float | None = None
+    seed: int | None = None
+    max_tokens: int | None = None
+
+
+def _resolve_temperature(overrides: GenerationOverrides | None) -> float:
+    if overrides is not None and overrides.temperature is not None:
+        return overrides.temperature
+    return settings.llm_temperature
+
+
+def _resolve_max_tokens(overrides: GenerationOverrides | None) -> int:
+    if overrides is not None and overrides.max_tokens is not None:
+        return overrides.max_tokens
+    return settings.llm_max_tokens
+
+
 class LLMProvider(ABC):
     @abstractmethod
-    async def generate(self, system_prompt: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict] | None = None,
+        overrides: GenerationOverrides | None = None,
+    ) -> LLMResponse:
         pass
 
 
@@ -97,13 +129,24 @@ class ClaudeProvider(LLMProvider):
 
         self.client = anthropic.AsyncAnthropic(**kwargs)
 
-    async def generate(self, system_prompt: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict] | None = None,
+        overrides: GenerationOverrides | None = None,
+    ) -> LLMResponse:
+        # Anthropic пока не поддерживает seed-параметр стабильно — игнорируем его.
+        messages: list[dict] = []
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
         response = await self.client.messages.create(
             model=settings.llm_model,
-            max_tokens=settings.llm_max_tokens,
-            temperature=settings.llm_temperature,
+            max_tokens=_resolve_max_tokens(overrides),
+            temperature=_resolve_temperature(overrides),
             system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
+            messages=messages,
         )
         return LLMResponse(
             text=response.content[0].text,
@@ -135,19 +178,29 @@ class OpenAICompatibleProvider(LLMProvider):
         self.client = AsyncOpenAI(**kwargs)
         self.default_model = default_model
 
-    async def generate(self, system_prompt: str, user_message: str,
-                       history: list[dict] | None = None) -> LLMResponse:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict] | None = None,
+        overrides: GenerationOverrides | None = None,
+    ) -> LLMResponse:
         model = self.default_model if settings.llm_model.startswith("claude") else settings.llm_model
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
-        response = await self.client.chat.completions.create(
+        # OpenAI-compatible: большинство поддерживает seed — пробуем его подложить.
+        # Если провайдер не поддерживает — он просто проигнорирует поле.
+        kwargs: dict = dict(
             model=model,
-            max_tokens=settings.llm_max_tokens,
-            temperature=settings.llm_temperature,
+            max_tokens=_resolve_max_tokens(overrides),
+            temperature=_resolve_temperature(overrides),
             messages=messages,
         )
+        if overrides is not None and overrides.seed is not None:
+            kwargs["seed"] = overrides.seed
+        response = await self.client.chat.completions.create(**kwargs)
         choice = response.choices[0]
         usage = response.usage
         return LLMResponse(
@@ -284,24 +337,32 @@ class YandexGPTProvider(LLMProvider):
         self.api_key = settings.yandexgpt_api_key
         self.folder_id = settings.yandexgpt_folder_id
 
-    async def generate(self, system_prompt: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict] | None = None,
+        overrides: GenerationOverrides | None = None,
+    ) -> LLMResponse:
         model = settings.llm_model if "yandexgpt" in settings.llm_model else "yandexgpt-lite"
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         headers = {
             "Authorization": f"Api-Key {self.api_key}",
             "Content-Type": "application/json",
         }
+        msgs: list[dict] = [{"role": "system", "text": system_prompt}]
+        if history:
+            for h in history:
+                msgs.append({"role": h.get("role", "user"), "text": h.get("content", "")})
+        msgs.append({"role": "user", "text": user_message})
         body = {
             "modelUri": f"gpt://{self.folder_id}/{model}",
             "completionOptions": {
                 "stream": False,
-                "temperature": settings.llm_temperature,
-                "maxTokens": str(settings.llm_max_tokens),
+                "temperature": _resolve_temperature(overrides),
+                "maxTokens": str(_resolve_max_tokens(overrides)),
             },
-            "messages": [
-                {"role": "system", "text": system_prompt},
-                {"role": "user", "text": user_message},
-            ],
+            "messages": msgs,
         }
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, headers=headers, json=body)
@@ -345,21 +406,28 @@ class GigaChatProvider(LLMProvider):
             self._access_token = resp.json()["access_token"]
         return self._access_token
 
-    async def generate(self, system_prompt: str, user_message: str) -> LLMResponse:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict] | None = None,
+        overrides: GenerationOverrides | None = None,
+    ) -> LLMResponse:
         token = await self._get_token()
         model = settings.llm_model if "GigaChat" in settings.llm_model else "GigaChat"
+        msgs: list[dict] = [{"role": "system", "content": system_prompt}]
+        if history:
+            msgs.extend(history)
+        msgs.append({"role": "user", "content": user_message})
         async with httpx.AsyncClient(verify=False, timeout=60) as client:
             resp = await client.post(
                 "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {token}"},
                 json={
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "temperature": settings.llm_temperature,
-                    "max_tokens": settings.llm_max_tokens,
+                    "messages": msgs,
+                    "temperature": _resolve_temperature(overrides),
+                    "max_tokens": _resolve_max_tokens(overrides),
                 },
             )
             resp.raise_for_status()

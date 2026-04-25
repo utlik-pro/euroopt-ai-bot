@@ -5,7 +5,11 @@ import structlog
 from src.filters.content_filter import check_content
 from src.filters.pii_filter import mask_pii
 from src.filters.prompt_sanitizer import build_kb_block, build_web_block
-from src.llm.adapter import get_llm_provider_with_fallback, LLMResponse
+from src.llm.adapter import (
+    get_llm_provider_with_fallback,
+    GenerationOverrides,
+    LLMResponse,
+)
 from src.llm.prompts import SYSTEM_PROMPT
 from src.rag.engine import RAGEngine
 from src.promotions.engine import PromotionEngine
@@ -16,11 +20,25 @@ from src.search.query_rewriter import rewrite_query
 from src.search.typo_normalizer import normalize_typos
 from src.search.nbrb import detect_currencies, format_rates_block
 
+# v2 quality components — опциональные, включаются флагами env
+from src.canonical import CanonicalMatcher
+from src.router import IntentRouter, Intent
+from src.search.query_normalizer import normalize_query
+from src.verify import GroundingVerifier
+
 logger = structlog.get_logger()
 
 ENABLE_REWRITE = os.environ.get("ENABLE_QUERY_REWRITE", "true").lower() == "true"
 WEB_FALLBACK_MIN_RESULTS = int(os.environ.get("WEB_FALLBACK_MIN_RESULTS", "2"))
 WEB_FALLBACK_MIN_SCORE = float(os.environ.get("WEB_FALLBACK_MIN_SCORE", "0.60"))
+
+# v2 quality flags. По умолчанию выключены — старое поведение сохраняется.
+# Включать постепенно в проде через .env, чтобы можно было откатиться.
+ENABLE_CANONICAL = os.environ.get("ENABLE_CANONICAL_ANSWERS", "false").lower() == "true"
+ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "false").lower() == "true"
+ENABLE_QUERY_NORMALIZER = os.environ.get("ENABLE_QUERY_NORMALIZER", "false").lower() == "true"
+ENABLE_GROUNDING_VERIFY = os.environ.get("ENABLE_GROUNDING_VERIFY", "false").lower() == "true"
+GROUNDING_AUTO_FIX = os.environ.get("GROUNDING_AUTO_FIX", "false").lower() == "true"
 
 # Явные promo-триггеры: слова, которые однозначно про акции/скидки Евроторга.
 # Эти слова перебивают fresh_data даже если в вопросе есть «сегодня».
@@ -103,6 +121,14 @@ class Pipeline:
         self.promotions = PromotionEngine()
         self.history = ChatHistory(max_messages=20, ttl_minutes=60)
         self.web = get_web_search()
+        # v2 quality components — инициализируем всегда, активируем флагами в process()
+        self.canonical = CanonicalMatcher() if ENABLE_CANONICAL else None
+        self.intent_router = IntentRouter() if ENABLE_INTENT_ROUTER else None
+        self.grounding_verifier = (
+            GroundingVerifier(auto_fix=GROUNDING_AUTO_FIX)
+            if ENABLE_GROUNDING_VERIFY
+            else None
+        )
 
     async def process(self, user_message: str, user_id: int) -> str:
         """Process user message through the 4-layer pipeline.
@@ -146,11 +172,62 @@ class Pipeline:
         # сохраняем и никуда не отправляем.
         user_message = masked_user_message
 
+        # v2 Layer 1.5: Canonical answers — гарантия 100% повторяемости
+        # на критичных FAQ. Если запрос совпадает с известным шаблоном
+        # (вход в ЛК, утеря карты, оплата 99% и т.п.) — отдаём готовый
+        # ответ, минуя RAG/LLM. Это закрывает претензии заказчика по
+        # повторяемости (отчёт 24.04, P2).
+        if self.canonical is not None:
+            canonical_hit = self.canonical.match(user_message)
+            if canonical_hit is not None:
+                self.history.add(user_id, "user", user_message)
+                self.history.add(user_id, "assistant", canonical_hit.answer)
+                log.bot_response = canonical_hit.answer
+                log.llm_provider = "canonical"
+                log.llm_model = canonical_hit.id
+                log.response_time_ms = int((time.monotonic() - start_time) * 1000)
+                interaction_logger.log_request(log)
+                logger.info(
+                    "canonical_answer_served",
+                    user_id=user_id,
+                    canonical_id=canonical_hit.id,
+                    category=canonical_hit.category,
+                )
+                return canonical_hit.answer
+
+        # v2 Layer 1.6: Intent routing — определяем тип запроса для адаптивных
+        # параметров генерации (temperature, require_rag, allow_web).
+        intent_result = None
+        if self.intent_router is not None:
+            intent_result = self.intent_router.classify(user_message)
+            logger.info(
+                "intent_classified",
+                user_id=user_id,
+                intent=intent_result.intent.value,
+                confidence=intent_result.confidence,
+                temperature=intent_result.temperature,
+            )
+
         # Layer 2a: нормализация опечаток для search (оригинал user_message не меняем!)
         # «скидкиии» → «скидки», «едаставка» → «едоставка» и т.п.
         normalized = normalize_typos(user_message)
         if normalized != user_message:
             logger.info("typo_normalized", original=user_message[:60], normalized=normalized[:60])
+
+        # v2 Layer 2a': канонизация запроса для повторяемости.
+        # Развёртывание синонимов и сокращений: «ЛК» → «личный кабинет»,
+        # «магазины в Лиде» → «магазины Лида». Разные формулировки одного
+        # и того же вопроса дают одинаковые embeddings → одинаковый ранкинг
+        # → одинаковый ответ. Отчёт 24.04 P2: повторяемость.
+        if ENABLE_QUERY_NORMALIZER:
+            canonized = normalize_query(normalized, strip_stopwords=False)
+            if canonized and canonized != normalized.lower():
+                logger.info(
+                    "query_canonized",
+                    original=normalized[:60],
+                    canonized=canonized[:60],
+                )
+                normalized = canonized
 
         # Layer 2b: Query rewrite (только для коротких запросов)
         search_query = normalized
@@ -294,10 +371,49 @@ class Pipeline:
         # Get chat history for this user
         chat_history = self.history.get(user_id)
 
-        try:
-            response: LLMResponse = await self.llm.generate(
-                system, user_message, history=chat_history
+        # v2: подбираем overrides на основе intent — фактологические запросы
+        # получают temperature=0.0 (детерминизм + повторяемость), творческие
+        # (рецепты, smalltalk) — повыше. Если intent_router выключен — None,
+        # тогда адаптер использует settings.llm_temperature.
+        gen_overrides: GenerationOverrides | None = None
+        if intent_result is not None:
+            gen_overrides = GenerationOverrides(
+                temperature=intent_result.temperature,
+                # seed для повторяемости (поддерживается DeepSeek/OpenAI)
+                seed=42 if intent_result.deterministic else None,
             )
+
+        try:
+            # Сигнатуру вызова сохраняем минимальной (history был и раньше,
+            # overrides добавляем только когда intent_router реально что-то
+            # вернул) — это не ломает старые тесты с моками LLM.
+            if gen_overrides is not None:
+                response: LLMResponse = await self.llm.generate(
+                    system, user_message, history=chat_history, overrides=gen_overrides,
+                )
+            else:
+                response = await self.llm.generate(
+                    system, user_message, history=chat_history,
+                )
+
+            # v2: Grounding verify — после генерации проверяем, не появилось ли
+            # в ответе фактов (телефонов, цен, времени), которых нет в источниках.
+            # При auto_fix=True заменяем безопасными формулировками.
+            if self.grounding_verifier is not None:
+                vr = self.grounding_verifier.verify(
+                    response.text, kb_text=kb_block, web_text=web_block,
+                )
+                if not vr.is_grounded:
+                    log.filter_reason = (
+                        f"grounding:{','.join(sorted({i.kind for i in vr.issues}))}"
+                    )
+                    if GROUNDING_AUTO_FIX and vr.cleaned_text and vr.cleaned_text != response.text:
+                        logger.info(
+                            "grounding_auto_fixed",
+                            user_id=user_id,
+                            issues=len(vr.issues),
+                        )
+                        response.text = vr.cleaned_text
 
             # Ответ LLM НЕ маскируется: телефоны магазинов, адреса, ФИО
             # публичных лиц — публичная информация, должна быть в ответе.
