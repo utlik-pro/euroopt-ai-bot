@@ -7,6 +7,10 @@ services:
   autoDeploy: true
   dockerfilePath: ./Dockerfile
   dockerContext: .
+  # Парсинг xlsx-справочника магазинов (1040 точек, 55 автолавок) и переиндексация
+  # RAG-базы происходят на этапе docker build (см. Dockerfile).
+  # Это гарантирует, что после v2-релиза база уже содержит магазины с разметкой
+  # brand/format/city. ChromaDB пишется в /app/data/chroma в образе.
   disk:
     name: euroopt-persist
     mountPath: /app/persist
@@ -28,8 +32,10 @@ services:
     value: '1024'
   - key: LLM_TIMEOUT
     value: '60'
+  # E5-multilingual — заметно лучше MiniLM на русском, используется в RAGEngine
+  # с префиксами query:/passage:. Коллекция в ChromaDB — euroopt_knowledge_v3.
   - key: EMBEDDING_MODEL
-    value: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+    value: intfloat/multilingual-e5-base
   - key: RAG_SCORE_THRESHOLD
     value: '0.30'
   - key: RAG_TOP_K
@@ -51,7 +57,7 @@ services:
   - key: TAVILY_API_KEY
     sync: false
   - key: WEB_SEARCH_ENABLED
-    value: 'false'
+    value: 'true'
   - key: WEB_SEARCH_DOMAINS
     value: evroopt.by,hitdiscount.by,groshyk.by,igra.evroopt.by,eplus.by,e-dostavka.by
   - key: WEB_SEARCH_CACHE_TTL
@@ -62,3 +68,66 @@ services:
     value: 'true'
   - key: WEB_FALLBACK_MIN_RESULTS
     value: '2'
+
+  # ========================================================================
+  # v2 Quality Improvements — пофазное включение флагов.
+  # ФАЗА 1 (включаем СЕЙЧАС, минимум риска, максимум эффекта):
+  # ========================================================================
+  # 10 канонических FAQ дословно: вход в ЛК, утеря карты, перенос бонусов,
+  # «99% / 2 копейки», виртуальная карта, горячая линия и др. Закрывает
+  # претензии 21.04 и 24.04 P2. 100% повторяемости на этих сценариях.
+  - key: ENABLE_CANONICAL_ANSWERS
+    value: 'true'
+  # Классификация типа вопроса → правильная temperature: 0.0 для FAQ,
+  # 0.5 для рецептов. Закрывает «креатив на FAQ → галлюцинации».
+  - key: ENABLE_INTENT_ROUTER
+    value: 'true'
+
+  # ========================================================================
+  # ФАЗА 2 (включается через 1–2 дня после Фазы 1, если стабильно):
+  # ========================================================================
+  # Канонизация запроса: «магазины в Лиде» = «Лида Евроопт магазины».
+  # Закрывает 24.04 P2 (повторяемость).
+  - key: ENABLE_QUERY_NORMALIZER
+    value: 'false'
+  # Жёсткое разделение Евроопт / Хит / Грошык в выдаче (требует Фазы 1).
+  # Закрывает 24.04 P1 «по Лиде выдал Хит вместо Евроопт».
+  - key: ENABLE_BRAND_FILTER
+    value: 'false'
+  # Реестр 13 механик акций: Еврошок ≠ Спеццены ≠ Еплюс-бонусы ≠ 1+1.
+  # Закрывает 24.04 P1 «смешение механик».
+  - key: ENABLE_MECHANIC_CONTEXT
+    value: 'false'
+  # Префикс «🔒 Я не могу обрабатывать ПД» при обнаружении ПД.
+  # Закрывает 25.04 §6.4.
+  - key: ENABLE_PII_FRAME
+    value: 'false'
+
+  # ========================================================================
+  # ФАЗА 3 (после прогрева Фазы 2):
+  # ========================================================================
+  # Общий кэш «вопрос → ответ» с TTL 1ч. Не per-user (ТЗ §2 о ПД).
+  # Закрывает 24.04 P2 (Наташа == Лёша на одинаковых вопросах).
+  - key: ENABLE_RESPONSE_CACHE
+    value: 'false'
+  - key: CACHE_TTL_SECONDS
+    value: '3600'
+  # Маркер «📋 База / 🌐 Интернет» в рецептах. Закрывает 24.04 P3
+  # (прозрачность источника). Требует Фазы 1.
+  - key: ENABLE_SOURCE_TAGGER
+    value: 'false'
+  # Re-ranker для RAG: точнее находит документы (+5–10% lite, +15–20% CE).
+  - key: ENABLE_RERANKER
+    value: 'false'
+  - key: RERANKER_MODE
+    value: lite
+
+  # ========================================================================
+  # ФАЗА 4 (последняя, после полного прогрева):
+  # ========================================================================
+  # Проверка ответа против источников: ловит выдуманные телефоны/часы/цены.
+  # Сначала только лог (auto_fix=false), потом авто-замена.
+  - key: ENABLE_GROUNDING_VERIFY
+    value: 'false'
+  - key: GROUNDING_AUTO_FIX
+    value: 'false'
