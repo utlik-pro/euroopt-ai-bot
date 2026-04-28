@@ -34,7 +34,11 @@ RUN mkdir -p logs reports data/chroma persist/logs
 ENV CHROMA_PERSIST_DIR=/app/data/chroma
 ENV EMBEDDING_MODEL=intfloat/multilingual-e5-base
 ENV PYTHONUNBUFFERED=1
-RUN python scripts/parse_stores_xlsx.py || echo "stores xlsx parse skipped"
-RUN python scripts/reindex_v2.py || echo "reindex at build finished"
+# Парсинг 1040 магазинов из xlsx (идемпотентно). Если упадёт — build тоже
+# должен упасть, чтобы мы увидели проблему сразу.
+RUN python scripts/parse_stores_xlsx.py
+# Reindex ChromaDB на новой коллекции (e5-base, 768 dim). Settings.telegram_bot_token
+# имеет default="" чтобы build-time без secret env проходил без ошибки.
+RUN python scripts/reindex_v2.py
 
 CMD ["python", "-m", "src.bot.main"]
