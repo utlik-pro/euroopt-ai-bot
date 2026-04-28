@@ -16,7 +16,8 @@ def test_detect_evroshok():
     m = d.detect("какие сейчас акции Еврошок?")
     assert m is not None
     assert m.id == "evroshok"
-    assert m.network == "Евроопт"
+    # Заказчик 28.04: «Еврошок — это акция Е-доставки, не Евроопта офлайн».
+    assert m.network == "Е-доставка"
 
 
 def test_detect_evroshok_alias_lowercase():
