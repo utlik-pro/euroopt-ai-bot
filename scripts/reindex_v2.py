@@ -387,6 +387,46 @@ def load_stores_minsk_full():
     return n
 
 
+def load_all_stores_v2():
+    """Загрузка нового справочника 1040 магазинов с brand/format/city разметкой.
+
+    Источник: data/stores/all_stores.json (генерируется scripts/parse_stores_xlsx.py).
+    Формат: {brand, format, city, address, raw_name}.
+    Закрывает 24.04 P1 (смешение Евроопт/Хит) — каждая запись имеет
+    metadata.brand для жёсткой фильтрации в RAG.search.
+    """
+    fp = DATA / "stores/all_stores.json"
+    if not fp.exists():
+        return 0
+    items = json.load(open(fp, encoding="utf-8"))
+    n = 0
+    for s in items:
+        brand = s.get("brand") or "Евроопт"
+        fmt = s.get("format") or "Магазин"
+        city = s.get("city") or ""
+        address = s.get("address") or ""
+        sid = s.get("id", n)
+        text = (
+            f"Магазин сети {brand}\n"
+            f"Формат: {fmt}\n"
+            f"Город: {city}\n"
+            f"Адрес: {address}\n\n"
+            f"Ключевые слова: {brand} {city}, {fmt} в {city}, "
+            f"магазин в {city}, адрес {brand} {city}"
+        )
+        add(
+            f"store_v2_{sid}",
+            text,
+            "store",
+            source="all_stores",
+            brand=brand,
+            format=fmt,
+            city=city,
+        )
+        n += 1
+    return n
+
+
 def load_general_faq_additions():
     """Дополнительные FAQ-записи, закрывающие повторяющиеся вопросы тестеров."""
     additions = [
@@ -543,6 +583,7 @@ def main():
         "🆕 Акции Хит Дискаунтер": load_promotions_hit(),
         "🆕 Удача в придачу (FAQ + товары удачи)": load_udacha(),
         "🆕 Магазины с брендом (Евроопт/Хит)": load_stores_with_brand(),
+        "🆕🆕 v2: 1040 магазинов с brand/format/city": load_all_stores_v2(),
         "Магазины Минск с часами": load_stores_minsk_full(),
         "Рецепты DOCX": load_recipes_docx(),
         "Рецепты JSON": load_recipes_json(),
