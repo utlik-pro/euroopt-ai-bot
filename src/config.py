@@ -4,7 +4,10 @@ from pydantic import Field
 
 class Settings(BaseSettings):
     # Telegram
-    telegram_bot_token: str = Field(..., env="TELEGRAM_BOT_TOKEN")
+    # Default "" чтобы reindex / парсеры могли запускаться на этапе docker build
+    # без secret env vars. Реальная проверка наличия токена — в src/bot/main.py
+    # перед стартом aiogram-polling.
+    telegram_bot_token: str = Field(default="", env="TELEGRAM_BOT_TOKEN")
 
     # LLM — активный провайдер
     llm_provider: str = Field(default="anthropic", env="LLM_PROVIDER")

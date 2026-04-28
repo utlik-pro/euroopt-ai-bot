@@ -310,6 +310,14 @@ async def main():
     except Exception as e:
         logger.error("rag_init_error", error=str(e))
 
+    # Явная проверка токена — Settings допускает default="" для build-time
+    # (reindex/парсеры запускаются без секретов), но runtime обязан иметь токен.
+    if not settings.telegram_bot_token:
+        logger.error("missing_telegram_bot_token", msg="TELEGRAM_BOT_TOKEN не задан в env")
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN отсутствует в окружении — невозможно стартовать бота."
+        )
+
     pipeline = Pipeline()
     bot = Bot(
         token=settings.telegram_bot_token,
