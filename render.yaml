@@ -10,7 +10,7 @@ services:
   # Парсинг xlsx-справочника магазинов (1040 точек, 55 автолавок) и переиндексация
   # RAG-базы происходят на этапе docker build (см. Dockerfile).
   # Это гарантирует, что после v2-релиза база уже содержит магазины с разметкой
-  # brand/format/city. ChromaDB пишется в /app/data/chroma в образе.
+  # brand/format/city. ChromaDB пишется в /app/chroma_db (ВНЕ persist disk!).
   disk:
     name: euroopt-persist
     mountPath: /app/persist
@@ -40,8 +40,11 @@ services:
     value: '0.30'
   - key: RAG_TOP_K
     value: '5'
+  # КРИТИЧНО: /app/data — это смонтированный persist disk в Render.
+  # ChromaDB пишется ВНЕ disk (в /app/chroma_db), иначе persist disk
+  # перетирает свежесобранную в build коллекцию старой версией.
   - key: CHROMA_PERSIST_DIR
-    value: /app/data/chroma
+    value: /app/chroma_db
   - key: WHITELIST_ENABLED
     value: 'true'
   - key: NON_PRIVATE_IGNORE

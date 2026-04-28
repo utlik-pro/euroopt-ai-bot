@@ -24,14 +24,17 @@ COPY scripts/ ./scripts/
 COPY tests/ ./tests/
 
 # Create dirs
-RUN mkdir -p logs reports data/chroma persist/logs
+# /app/chroma_db — ChromaDB пишется ВНЕ persist disk (который смонтирован в
+# /app/data на Render). Это критично: persist disk перетирал бы ChromaDB,
+# собранную в build, скрывая новые embeddings.
+RUN mkdir -p logs reports /app/chroma_db persist/logs
 
 # Pre-build Chroma at image build (избегаем OOM на Render runtime).
 # Шаги:
 # 1. Парсим xlsx-справочник «Список ТО ЕТ Хит с форматами.xlsx» → all_stores.json
 #    (1040 магазинов с разметкой brand/format/city, в т.ч. 55 автолавок).
 # 2. Reindex: грузим все источники в ChromaDB (e5-base embeddings).
-ENV CHROMA_PERSIST_DIR=/app/data/chroma
+ENV CHROMA_PERSIST_DIR=/app/chroma_db
 ENV EMBEDDING_MODEL=intfloat/multilingual-e5-base
 ENV PYTHONUNBUFFERED=1
 # Парсинг 1040 магазинов из xlsx (идемпотентно). Если упадёт — build тоже
