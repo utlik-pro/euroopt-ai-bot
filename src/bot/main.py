@@ -272,6 +272,17 @@ async def handle_message(message: types.Message):
         await message.answer("Пожалуйста, отправьте текстовое сообщение.")
         return
 
+    # Минимальный/неинформативный ввод — просим уточнить, не запускаем pipeline.
+    # Закрывает 28.04 «Отправить «…» (три точки)».
+    text_clean = message.text.strip()
+    text_no_punct = re.sub(r"[^\w\s]", "", text_clean, flags=re.UNICODE)
+    if len(text_clean) <= 3 or not text_no_punct.strip():
+        await message.answer(
+            "Пожалуйста, уточните ваш вопрос — например: «как войти в Еплюс», "
+            "«где ближайший магазин», «какие сегодня акции» 🙂"
+        )
+        return
+
     if not await _gate(message, message.text):
         return
 
