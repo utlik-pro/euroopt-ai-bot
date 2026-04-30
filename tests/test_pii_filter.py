@@ -145,6 +145,40 @@ class TestAddress:
         assert "address" in types, f"Не определён адрес: {msg}\n → {masked}"
         assert PLACEHOLDERS["address"] in masked
 
+    @pytest.mark.parametrize("msg", [
+        # Whitelist: запрос про магазин (топоним), а не PII пользователя.
+        # 30.04 — отчёт agent_tester показал false positive на «пр-т Победителей в Минске».
+        "Евроопт на пр-те Победителей в Минске",
+        "Где гипермаркет на ул. Казинца?",
+        "Найти магазин ул. Притыцкого 29",
+        "Грошык в Минске на ул. Рокоссовского",
+        "Магазин Хит на ул. Первомайская, 50",
+        "магазины Евроопт в Лиде",
+        "автолавка по ул. Советская",
+        "ближайший Евроопт на ул. Сурганова",
+    ])
+    def test_address_whitelisted_when_store_context(self, msg):
+        masked, types = mask_pii(msg)
+        assert "address" not in types, (
+            f"Топоним магазина ошибочно помечен как PII: {msg!r}\n → {masked!r}"
+        )
+
+    @pytest.mark.parametrize("msg", [
+        # PII должен сработать, несмотря на упоминание магазина:
+        # это явная просьба что-то прислать на персональный адрес.
+        "Доставьте по адресу: ул. Ленина, 10, кв. 15",
+        "Привезите еду из Евроопта на ул. Куприна, 8",
+        "Я живу рядом с Грошык на ул. Гагарина, 27",
+        "Адрес доставки: ул. Купалы, 50",
+        "Пришлите курьера Евроопт на пр-т Независимости, 48",
+    ])
+    def test_address_still_masked_when_personal_context(self, msg):
+        masked, types = mask_pii(msg)
+        assert "address" in types, (
+            f"Личный адрес не замаскирован: {msg!r}\n → {masked!r}"
+        )
+        assert PLACEHOLDERS["address"] in masked
+
 
 class TestFIO:
     @pytest.mark.parametrize("msg", [

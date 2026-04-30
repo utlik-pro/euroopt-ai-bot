@@ -9,6 +9,11 @@ build/
 # Environment
 .env
 
+# Telethon sessions (содержат токены аутентификации Telegram)
+*.session
+*.session-journal
+data/agent_tester*
+
 # Data (generated)
 data/chroma/
 # Раньше исключали бинарники от заказчика — теперь включаем в репу
