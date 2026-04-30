@@ -56,8 +56,10 @@ services:
     value: 'true'
   - key: NON_PRIVATE_IGNORE
     value: 'true'
+  # Поднято на время повторного тестирования заказчиком (30.04 — 05.05).
+  # После завершения теста вернуть на 20.
   - key: RATE_LIMIT_PER_HOUR
-    value: '20'
+    value: '1000'
   - key: PRE_APPROVED_USERNAMES
     value: dmitryutlik,yana_martynen,barysm,Netkach
   - key: LOG_LEVEL
@@ -72,8 +74,10 @@ services:
     value: evroopt.by,hitdiscount.by,groshyk.by,igra.evroopt.by,eplus.by,e-dostavka.by
   - key: WEB_SEARCH_CACHE_TTL
     value: '21600'
+  # Поднято на время повторного тестирования заказчиком (30.04 — 05.05).
+  # После завершения теста вернуть на 500.
   - key: WEB_SEARCH_MAX_PER_DAY
-    value: '500'
+    value: '5000'
   - key: ENABLE_QUERY_REWRITE
     value: 'true'
   - key: WEB_FALLBACK_MIN_RESULTS
