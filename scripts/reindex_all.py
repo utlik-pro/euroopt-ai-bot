@@ -136,7 +136,7 @@ def load_promotions():
     return n
 
 
-# === Stores Минск (компактный JSON) ===
+# === Stores Евроопт (свежий формат с координатами/расписанием) ===
 def load_stores_minsk():
     n = 0
     fp = DATA / "stores/euroopt.json"
@@ -144,25 +144,38 @@ def load_stores_minsk():
         return 0
     items = json.load(open(fp, encoding="utf-8"))
     for i, st in enumerate(items):
-        name = st.get("name", "Евроопт")
+        # Новый формат после scrape (30.04.2026): brand/format/city/address/lat/lng/schedule
+        # Старый формат (legacy): name/address/city/hours
         addr = st.get("address", "")
         city = st.get("city", "Минск")
-        hrs = st.get("hours", "")
+        fmt = st.get("format", "")
+        sched = st.get("schedule", {})
+        if isinstance(sched, dict) and sched:
+            hrs = (
+                f"Пн-Пт {sched.get('mon','')}; "
+                f"Сб {sched.get('sat','')}; "
+                f"Вс {sched.get('sun','')}"
+            )
+        else:
+            hrs = st.get("hours", "")
         text = (
             f"Магазин Евроопт в {city}\n"
-            f"Название: {name}\n"
-            f"Адрес: {city}, {addr}\n"
+            f"Формат: {fmt}\n"
+            f"Адрес: {addr}\n"
             f"Часы работы: {hrs}\n\n"
-            f"Ключевые слова: адрес магазина, время работы, режим, {city}"
+            f"Ключевые слова: адрес магазина, время работы, режим, {city}, {fmt}"
         )
-        add(f"store_minsk_{i}", text, "store", source="euroopt.json", city=city)
+        add(f"store_eur_{i}", text, "store", source="euroopt.by/shops", city=city, fmt=fmt, brand="Евроопт")
         n += 1
     return n
 
 
-# === Stores Беларусь (xlsx — 798 точек) ===
+# === Stores Беларусь (xlsx — backup на случай если scraping не сработал) ===
 def load_stores_belarus():
     fp = DATA / "stores/stores_alexey.xlsx"
+    # Если есть свежий all_stores.json — пропускаем xlsx, чтобы не дублировать
+    if (DATA / "stores/all_stores.json").exists():
+        return 0
     if not fp.exists():
         return 0
     wb = openpyxl.load_workbook(fp)
@@ -184,6 +197,59 @@ def load_stores_belarus():
             f"Ключевые слова: адрес, {region}"
         )
         add(f"store_bel_{i}", text, "store", source="stores_alexey", region=region)
+        n += 1
+    return n
+
+
+# === Stores Хит + Грошык (из all_stores.json) ===
+def load_stores_hit_groshyk():
+    """Индексируем Хит и Грошык из all_stores.json (свежие данные с сайтов 30.04.2026)."""
+    fp = DATA / "stores/all_stores.json"
+    if not fp.exists():
+        return 0
+    items = json.load(open(fp, encoding="utf-8"))
+    n = 0
+    for i, st in enumerate(items):
+        brand = st.get("brand", "")
+        if brand not in ("Хит", "Грошык"):
+            continue
+        addr = st.get("address", "")
+        city = st.get("city", "")
+        region = st.get("format_group", "")
+        fmt = st.get("format", "")
+        text = (
+            f"Магазин {brand} в {city}\n"
+            f"Сеть: {brand} ({'низкие цены, дискаунтер' if brand == 'Хит' else 'жёсткий дискаунтер'})\n"
+            f"Формат: {fmt}\n"
+            f"Адрес: {addr}\n"
+            f"Регион: {region}\n\n"
+            f"Ключевые слова: адрес магазина {brand}, {city}, {region}, дискаунтер"
+        )
+        add(f"store_{brand.lower()}_{i}", text, "store", source=st.get("source", ""), city=city, brand=brand)
+        n += 1
+    return n
+
+
+# === Stores автолавки ===
+def load_stores_avtolavki():
+    """Автолавки на сайте евроопт не показаны, но есть в нашем справочнике (55 точек)."""
+    fp = DATA / "stores/all_stores.json"
+    if not fp.exists():
+        return 0
+    items = json.load(open(fp, encoding="utf-8"))
+    n = 0
+    for i, st in enumerate(items):
+        if st.get("format") != "Автолавка":
+            continue
+        addr = st.get("address", "")
+        city = st.get("city", "")
+        text = (
+            f"Автолавка Евроопт в {city}\n"
+            f"Формат: мобильный магазин (автолавка) сети Евроопт\n"
+            f"Локация: {addr}\n\n"
+            f"Ключевые слова: автолавка, мобильный магазин, выездная торговля, {city}, село, деревня"
+        )
+        add(f"store_avtolavka_{i}", text, "store", source="alexey-xlsx", city=city, fmt="Автолавка", brand="Евроопт")
         n += 1
     return n
 
@@ -263,8 +329,10 @@ def main():
         "FAQ Еплюс": load_faq_eplus(),
         "FAQ JSON": load_faq_json(),
         "Promotions": load_promotions(),
-        "Stores Минск": load_stores_minsk(),
-        "Stores Беларусь": load_stores_belarus(),
+        "Stores Евроопт": load_stores_minsk(),
+        "Stores Беларусь (xlsx fallback)": load_stores_belarus(),
+        "Stores Хит+Грошык": load_stores_hit_groshyk(),
+        "Stores автолавки": load_stores_avtolavki(),
         "Recipes DOCX": load_recipes_docx(),
         "Recipes JSON": load_recipes_json(),
     }
@@ -276,6 +344,7 @@ def main():
     rag = RAGEngine()
     # Сбрасываем коллекцию — старая запутана
     try:
+        rag.client.delete_collection("euroopt_knowledge_v3")
         rag.client.delete_collection("euroopt_knowledge_v2")
         print("  старая коллекция удалена")
     except Exception:
