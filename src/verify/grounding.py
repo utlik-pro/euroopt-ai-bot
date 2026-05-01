@@ -39,6 +39,39 @@ TIME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Адрес магазина в ответе бота. Ловим именно подозрительные формы:
+# 1. Адрес С детализацией «корп.», «пом.», «офис», «к.» — частая галлюцинация LLM,
+#    который дописывает несуществующие помещения к реальным номерам домов.
+# 2. Диапазоны типа «дом 74-98» — таких адресов не существует, это «обобщение».
+# 3. Полный адрес с маркером улицы + номером дома — для общей проверки в источниках.
+#
+# Найденный фрагмент проверяется на дословное вхождение в kb_text + web_text.
+# Если нет — флагируется как unsupported_facts kind=address.
+ADDRESS_DETAILED_RE = re.compile(
+    r"(?ix)"
+    r"(?:ул\.?|улиц[аы]|пр-?т[еауы]?\.?|пр\.|проспект[ауе]?|пер\.|переул(?:ок|ка)|"
+    r"бул\.?|бульвар[ауе]?|б-р[еауы]?\.?|ш\.|шоссе|наб\.?|пл\.?|площад[ьи]|"
+    r"мкр(?:-н)?\.?|микрорайон\w*|тракт)"
+    r"\s+[А-ЯЁа-яёA-Za-z][\w\-\.]{1,40}"
+    r"(?:\s+[А-ЯЁа-яёA-Za-z\-\d\.]{1,40}){0,3}"
+    r"(?:[,\s]+(?:д\.?|дом\s+)?\d+[а-яёА-ЯЁa-z\-/]*)"
+    r"(?:[,\s]+(?:корп(?:ус|\.)?|к\.)\s*\d+[а-яёА-ЯЁa-z\-/]*)?"
+    r"(?:[,\s]+(?:кв(?:артира|\.)?|пом(?:ещение|\.)?|офис)\s*[\d,\-А-ЯЁа-яёA-Za-z]+)?"
+)
+
+# Диапазон «дом 74-98» — однозначная галлюцинация (одного дома быть в диапазоне не может).
+# Нумерация типа «3/3», «10А», «23/1» — НЕ диапазон, разделитель «/» или буква.
+# Диапазон именно «N-M» где оба — целые числа без модификаторов.
+ADDRESS_RANGE_RE = re.compile(
+    r"(?:д\.?|дом\s+|,\s*)\b(\d{1,4}[\-–—]\d{1,4})\b(?!\s*[/\\а-яёА-ЯЁa-zA-Z])"
+)
+
+# Маркеры детализации адреса, которые LLM любит дописывать.
+# Если они встретились в ответе — подозрительно, проверяем строже.
+ADDRESS_DETAIL_MARKERS = re.compile(
+    r"(?i)\b(?:корп(?:ус|\.)?|кв(?:артира|\.)?|пом(?:ещение|\.)?|офис)\s*[\d№#]"
+)
+
 
 @dataclass
 class VerifyIssue:
@@ -108,6 +141,32 @@ class GroundingVerifier:
             out.append(VerifyIssue(kind=kind, value=value, context_snippet=ctx))
         return out
 
+    def _extract_addresses(self, text: str) -> list[VerifyIssue]:
+        """Извлекаем адреса для проверки. Приоритет — подозрительные формы.
+
+        Стратегия:
+        1. Диапазоны «дом 74-98» → всегда unsupported (таких адресов нет).
+        2. Адреса с маркерами «корп.», «пом.», «офис», «кв.» → проверяем строже.
+        3. Обычные адреса (улица + дом) → проверяем дословное вхождение в kb.
+        """
+        out: list[VerifyIssue] = []
+
+        # 1) Диапазоны — однозначная галлюцинация
+        for m in ADDRESS_RANGE_RE.finditer(text):
+            value = m.group(0).strip(" ,.")
+            start, end = m.span()
+            ctx = text[max(0, start - 30):min(len(text), end + 30)].replace("\n", " ")
+            out.append(VerifyIssue(kind="address_range", value=value, context_snippet=ctx))
+
+        # 2) Полные адреса (улица + дом + опционально корп/пом)
+        for m in ADDRESS_DETAILED_RE.finditer(text):
+            value = m.group(0).strip()
+            start, end = m.span()
+            ctx = text[max(0, start - 30):min(len(text), end + 30)].replace("\n", " ")
+            out.append(VerifyIssue(kind="address", value=value, context_snippet=ctx))
+
+        return out
+
     def verify(
         self,
         response_text: str,
@@ -126,10 +185,15 @@ class GroundingVerifier:
         candidates.extend(self._extract(response_text, PERCENT_RE, "percent"))
         candidates.extend(self._extract(response_text, PRICE_RE, "price"))
         candidates.extend(self._extract(response_text, TIME_RE, "time"))
+        candidates.extend(self._extract_addresses(response_text))
 
         # Фильтруем: безопасные (canonical) сразу пропускаем, остальные проверяем в источниках
         unsupported: list[VerifyIssue] = []
         for issue in candidates:
+            # address_range — всегда плохо (диапазоны домов не существуют)
+            if issue.kind == "address_range":
+                unsupported.append(issue)
+                continue
             if self._is_safe(issue.kind, issue.value):
                 continue
             if self._is_in_sources(issue.value, sources):
