@@ -310,6 +310,172 @@ def load_udacha_current_tur():
     return 1
 
 
+# ============ Текущая листовка Евроопт (от заказчика, snapshot) ============
+
+
+def load_listovka_current():
+    """Снимок текущей листовки Евроопт (data/promotions/listovka_current.json).
+
+    Источник — xlsx от заказчика, спарсенный из официальной PDF-листовки
+    evroopt.by/deals + страниц «СВАЁ» / «Родныя тавары».
+    Парсится отдельным скриптом scripts/parse_listovka_xlsx.py.
+
+    Чанки:
+    1. Сводка периода + разбивка по акциям (1 чанк) — для запросов «какие акции?».
+    2. Per-promo каталоги с ценами (по чанку на акцию) — для конкретных вопросов.
+    3. СВАЁ ассортимент (1 чанк) — справочник кодов СВАЁ.
+    4. Родныя тавары — материалы раздела (1 чанк).
+    """
+    fp = DATA / "promotions/listovka_current.json"
+    if not fp.exists():
+        return 0
+    try:
+        data = json.load(open(fp, encoding="utf-8"))
+    except Exception:
+        return 0
+
+    products = data.get("products") or []
+    meta = data.get("meta") or {}
+    if not products:
+        return 0
+
+    period = meta.get("period") or "—"
+    dump_date = meta.get("dump_date") or "—"
+    breakdown = meta.get("promo_breakdown") or {}
+    n = 0
+
+    # 1) Сводка
+    breakdown_str = "\n".join(f"  • {k}: {v} товаров" for k, v in breakdown.items())
+    summary = (
+        f"Текущая листовка сети «Евроопт»: {len(products)} товаров.\n"
+        f"Период действия акции: {period}.\n"
+        f"Дата выгрузки: {dump_date}.\n\n"
+        f"Разделы листовки:\n{breakdown_str}\n\n"
+        f"Полная актуальная листовка с ценами и условиями: https://evroopt.by/deals/\n"
+        f"Цены приведены по состоянию на начало периода и могут изменяться.\n\n"
+        f"Ключевые слова: текущая листовка, актуальные акции, какие акции сейчас, "
+        f"что по скидкам, листовка Евроопт, май 2026, апрель 2026, "
+        f"красная цена, родныя тавары, гриль фест, цена вниз с Еплюс"
+    )
+    add(
+        "listovka_summary",
+        summary,
+        "promotion",
+        source="listovka_current.json",
+        promo_name="summary",
+    )
+    n += 1
+
+    # 2) Per-promo чанки с товарами
+    by_promo: dict[str, list[dict]] = {}
+    for p in products:
+        by_promo.setdefault(p["promo"], []).append(p)
+
+    for promo_name, items in by_promo.items():
+        # сортируем по цене для предсказуемости
+        items_sorted = sorted(items, key=lambda x: x.get("price") or 0.0)
+        # ограничиваем 60 товаров на чанк (RAG embedding capacity)
+        head = items_sorted[:60]
+        lines = []
+        for it in head:
+            old = it.get("old_price")
+            disc = it.get("discount") or ""
+            per_unit = it.get("per_unit") or ""
+            until = it.get("valid_until") or period
+            line = f"• {it['name']} — {it['price']} BYN"
+            if old:
+                line += f" (было {old} BYN)"
+            if disc:
+                line += f" {disc}"
+            if per_unit:
+                line += f"; {per_unit}"
+            if until:
+                line += f"; до {until}"
+            note = it.get("note") or ""
+            if note and "только в гипермаркетах" in note.lower():
+                line += "; только в гипермаркетах"
+            lines.append(line)
+        body = "\n".join(lines)
+
+        # Особое предупреждение про «Цена вниз с Еплюс»
+        eplus_note = ""
+        if "еплюс" in promo_name.lower():
+            eplus_note = (
+                "\nВНИМАНИЕ: цены этого блока действуют только при оплате с картой Еплюс. "
+                "Без карты — обычная цена.\n"
+            )
+
+        text = (
+            f"Текущая листовка Евроопт — раздел «{promo_name}» ({period}).\n"
+            f"Всего товаров в разделе: {len(items)}{', ниже первые ' + str(len(head)) if len(items) > len(head) else ''}.\n"
+            f"{eplus_note}\n"
+            f"Товары и цены:\n{body}\n\n"
+            f"Полный список — на сайте https://evroopt.by/deals/.\n"
+            f"Цены приведены по состоянию на начало периода и могут изменяться.\n\n"
+            f"Ключевые слова: акция «{promo_name}», текущая листовка, цены, скидки, "
+            f"товары акции, что в листовке, перечень товаров"
+        )
+        # делаем безопасный id из имени промо
+        slug = re.sub(r"[^a-zа-я0-9_]+", "_", promo_name.lower())[:40].strip("_")
+        add(
+            f"listovka_{slug}",
+            text,
+            "promotion",
+            source="listovka_current.json",
+            promo_name=promo_name[:50],
+        )
+        n += 1
+
+    # 3) СВАЁ ассортимент
+    svae = data.get("svae_assortment") or []
+    if svae:
+        lines = [f"• [{s['code']}] {s['name']} — {s.get('category','')}" for s in svae[:80]]
+        text = (
+            f"СВАЁ — товары собственной торговой марки сети «Евроопт».\n"
+            f"Раздел сайта: https://evroopt.by/svae/\n\n"
+            f"Ассортимент (фрагмент, {len(svae)} позиций):\n" + "\n".join(lines) + "\n\n"
+            f"Это справочник кодов и названий; актуальные цены и наличие — "
+            f"в магазинах сети и на https://evroopt.by/svae/.\n\n"
+            f"Ключевые слова: СВАЁ, своё, sva, sva, своя марка, "
+            f"собственная марка, евроопт сваё, частная марка, СТМ"
+        )
+        add(
+            "listovka_svae_assortment",
+            text,
+            "promotion",
+            source="listovka_current.json",
+            promo_name="СВАЁ ассортимент",
+        )
+        n += 1
+
+    # 4) Родныя тавары — новости / акции
+    rod = data.get("rodnyya_news") or []
+    if rod:
+        lines = []
+        for r in rod[:20]:
+            line = f"• {r.get('date','')}: {r['title']}"
+            if r.get("url"):
+                line += f" — {r['url']}"
+            lines.append(line)
+        text = (
+            f"«Родныя тавары» — белорусские товары в сети «Евроопт».\n"
+            f"Раздел сайта: https://evroopt.by/narodnyya-tovary/\n\n"
+            f"Материалы раздела:\n" + "\n".join(lines) + "\n\n"
+            f"Ключевые слова: Родныя тавары, родныя товары, белорусские товары, "
+            f"белорусское качество, родная марка, отечественные товары"
+        )
+        add(
+            "listovka_rodnyya_news",
+            text,
+            "promotion",
+            source="listovka_current.json",
+            promo_name="Родныя тавары — новости",
+        )
+        n += 1
+
+    return n
+
+
 def load_udacha():
     fp = DATA / "udacha/igra.evroopt УВП.xlsx"
     wb = openpyxl.load_workbook(fp)
@@ -631,6 +797,7 @@ def main():
         "Brand links (evroopt/groshyk/hitdiscount)": load_brand_links(),
         "🆕 Акции Евроопт (Красная цена, Цены вниз, Бонусы, Грильфест)": load_promotions_evroopt(),
         "🆕 Акции Хит Дискаунтер": load_promotions_hit(),
+        "🆕 Текущая листовка Евроопт (snapshot от заказчика)": load_listovka_current(),
         "🆕 Удача в придачу — текущий тур (cron-парсер главной)": load_udacha_current_tur(),
         "🆕 Удача в придачу (FAQ + товары удачи)": load_udacha(),
         "🆕 Магазины с брендом (Евроопт/Хит)": load_stores_with_brand(),
