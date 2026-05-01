@@ -30,15 +30,15 @@ dp = Dispatcher()
 pipeline: Pipeline | None = None
 
 
-WELCOME_MESSAGE = """👋 Здравствуйте! Я AI-ассистент сети «Евроторг» — магазинов «Евроопт», «Грошык» и «Хит Дискаунтер».
+WELCOME_MESSAGE = """👋 Здравствуйте! Я AI-ассистент магазинов «Евроопт», «Хит» и «Грошык».
 
-Напишите свой вопрос в свободной форме — расскажу про акции, карту Еплюс, магазины, рецепты и «Удачу в придачу».
+Напишите свой вопрос в свободной форме, а я расскажу вам про акции, карту «Еплюс», наши магазины, рецепты и игру «Удачу в придачу».
 
-Примеры:
+Например:
 • «Что такое Красная цена?»
 • «Какие акции в Хит?»
 • «Как получить карту Еплюс?»
-• «Призы в 214 туре "Удачи в придачу"?»
+• «Призы в Удача в придачу?»
 • «Адрес ближайшего Евроопта»"""
 
 
@@ -272,9 +272,20 @@ async def handle_message(message: types.Message):
         await message.answer("Пожалуйста, отправьте текстовое сообщение.")
         return
 
+    # /start как обычный текст (с пробелами, суффиксами и т.п.) — НЕ должен попадать
+    # в pipeline и получать отказ content-фильтра. 30.04 тестировщик заказчика
+    # пожаловался: «бот не должен отказывать на системную команду».
+    text_clean = message.text.strip()
+    text_lower = text_clean.lower()
+    if text_lower in ("/start", "start", "/help", "help", "помощь", "/menu", "меню"):
+        if not await _gate(message, text_clean):
+            return
+        await message.answer(WELCOME_MESSAGE)
+        log_message(message.from_user, "out", WELCOME_MESSAGE)
+        return
+
     # Минимальный/неинформативный ввод — просим уточнить, не запускаем pipeline.
     # Закрывает 28.04 «Отправить «…» (три точки)».
-    text_clean = message.text.strip()
     text_no_punct = re.sub(r"[^\w\s]", "", text_clean, flags=re.UNICODE)
     if len(text_clean) <= 3 or not text_no_punct.strip():
         await message.answer(
