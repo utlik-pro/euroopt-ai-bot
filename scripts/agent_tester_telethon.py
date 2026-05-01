@@ -152,6 +152,43 @@ def validate_response(scenario: dict, response_text: str) -> dict:
                 issues.append(f"city_{c}_not_in_response")
                 break
 
+    # === PR #27: семантическая полнота ===
+    # 1) Пустой список после preamble: «вот адрес:», «следующие магазины:», «вот их адреса:»
+    #    — должен быть хотя бы один пункт списка (с улицей или числом).
+    PREAMBLE_RE = re.compile(
+        r"(?:вот\s+(?:его\s+)?адрес|вот\s+их\s+адреса?|следующ[еи][меу]\s+(?:адрес|магазин)|"
+        r"находится\s+по\s+следующему\s+адрес|есть\s+несколько\s+магазин\w*)\s*[:.\n]",
+        re.IGNORECASE,
+    )
+    pre_m = PREAMBLE_RE.search(response_text)
+    if pre_m:
+        # Берём текст ПОСЛЕ preamble и до первого «Для уточнения»/«Полный список» (postamble)
+        tail = response_text[pre_m.end():]
+        for postamble in ("Для уточнения", "Полный список", "Для получения дополнительной"):
+            cut = tail.find(postamble)
+            if cut > 0:
+                tail = tail[:cut]
+                break
+        # В этом фрагменте должна быть хотя бы 1 строка с адресом или нумерованный пункт
+        has_addr = re.search(r"(?:ул\.|пр-?т\.?|пр\.|проспект|пер\.|бул\.|шоссе|пл\.)\s+\S", tail, re.IGNORECASE)
+        has_item = re.search(r"^\s*\d+\.\s+\S", tail, re.MULTILINE)
+        if not has_addr and not has_item:
+            issues.append("empty_list_after_preamble")
+
+    # 2) «Категорийный запрос про акции» (молочка / мясо / хлеб и т.п.) — если в ответе
+    #    есть «не вижу в моей базе» / «нет информации» — issue (потому что у нас есть листовка).
+    q_low = scenario.get("query", "").lower()
+    cat_words = ["молочк", "молоко", "мясо", "хлеб", "овощ", "фрукт", "сыр", "колбас"]
+    if any(w in q_low for w in cat_words) and "акци" in q_low:
+        if "не вижу" in low or "нет информации" in low or "конкретные акции" in low:
+            issues.append("category_query_refusal_when_listovka_present")
+
+    # 3) «Когда заканчивается Еврошок?» / Е-доставка — должен быть редирект на e-dostavka,
+    #    а не «нет информации».
+    if any(w in q_low for w in ["еврошок", "е-доставк", "едоставк"]):
+        if "нет информации" in low and "e-dostavka" not in low and "е-доставк" not in low:
+            issues.append("evroshok_no_redirect_to_edostavka")
+
     return {
         "pass": len(issues) == 0,
         "issues": issues,
