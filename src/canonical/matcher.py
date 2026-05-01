@@ -38,6 +38,11 @@ class CanonicalAnswer:
     triggers: list[str]
     answer: str
     min_score: float = DEFAULT_MIN_SCORE
+    # Если задан — в запросе пользователя должно быть хотя бы одно из этих
+    # ключевых слов (substring, case-insensitive). Защита от false positives
+    # при коротких триггерах с общими токенами («акции», «какие»).
+    # 01.05 — добавлено для edostavka_promo_no_info после bug на проде.
+    required_keywords: list[str] = None  # type: ignore
 
 
 class CanonicalMatcher:
@@ -73,6 +78,7 @@ class CanonicalMatcher:
                         triggers=raw.get("triggers", []),
                         answer=raw["answer"].strip(),
                         min_score=raw.get("min_score", DEFAULT_MIN_SCORE),
+                        required_keywords=raw.get("required_keywords") or [],
                     )
                 )
             logger.info("canonical_answers_loaded", count=len(self.answers))
@@ -114,6 +120,11 @@ class CanonicalMatcher:
 
         best: tuple[float, CanonicalAnswer | None] = (0.0, None)
         for ans in self.answers:
+            # Защита от false positive: если у ответа задан required_keywords,
+            # и ни одного из них нет в запросе — пропускаем.
+            if ans.required_keywords:
+                if not any(kw.lower() in q_norm for kw in ans.required_keywords):
+                    continue
             for trig in ans.triggers:
                 s = self._score(q_norm, trig)
                 if s > best[0]:
