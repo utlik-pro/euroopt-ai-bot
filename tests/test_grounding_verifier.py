@@ -251,3 +251,82 @@ class TestAddressAutoFix:
         res = v.verify(text, kb_text=kb)
         # Оба удалены (галлюцинации). Бот должен дать редирект.
         assert "evroopt.by/shops" in res.cleaned_text
+
+
+class TestAddressFuzzyMatch:
+    """PR #26: при перефразировке адреса (LLM выкинула «В.Ф.»/инициалы)
+    verifier не должен резать всю строку списка."""
+
+    def test_legit_address_with_initials_in_kb_kept(self):
+        """RAG: «ул. Шаранговича В.Ф., 48»; ответ: «ул. Шаранговича, 48» — должен пройти."""
+        v = GroundingVerifier(auto_fix=True)
+        kb = "Магазин: Минск, ул. Шаранговича В.Ф., 48"
+        text = "В Минске: ул. Шаранговича, 48"
+        res = v.verify(text, kb_text=kb)
+        assert res.is_grounded, f"Адрес легитимен (улица+дом совпадают), нельзя резать. Issues: {res.issues}"
+        assert "Шаранговича" in res.cleaned_text and "48" in res.cleaned_text
+
+    def test_three_legit_addresses_all_kept(self):
+        """Список из 3 реальных адресов не должен схлопываться."""
+        v = GroundingVerifier(auto_fix=True)
+        kb = (
+            "Магазин: Минск, ул. Шаранговича В.Ф., 48\n"
+            "Магазин: Минск, ул. Матусевича , 79\n"
+            "Магазин: Минск, пр-т Победителей, 65"
+        )
+        text = (
+            "В Минске:\n"
+            "1. ул. Шаранговича, 48\n"
+            "2. ул. Матусевича, 79\n"
+            "3. пр-т Победителей, 65"
+        )
+        res = v.verify(text, kb_text=kb)
+        assert res.is_grounded, f"Все 3 адреса легитимны. Issues: {res.issues}"
+        # Все 3 пункта остались
+        for i in ("Шаранговича", "Матусевича", "Победителей"):
+            assert i in res.cleaned_text
+
+    def test_fake_corp_in_real_street_still_flagged(self):
+        """Даже если улица+дом легитимны, добавленный «корп. 3, пом. 7Н» — галлюцинация."""
+        v = GroundingVerifier(auto_fix=True)
+        kb = "Магазин: Минск, ул. Шаранговича В.Ф., 48"
+        text = "Магазин: ул. Шаранговича, 48, корп. 3, пом. 7Н"
+        res = v.verify(text, kb_text=kb)
+        assert not res.is_grounded, "Адрес с фальш-«корп./пом.» должен флажиться"
+
+    def test_completely_wrong_address_still_flagged(self):
+        """Если улицы вообще нет в источнике — режется."""
+        v = GroundingVerifier(auto_fix=True)
+        kb = "Магазин: Минск, ул. Шаранговича В.Ф., 48"
+        text = "В Минске: ул. ВыдуманнаяТакаяНетакая, 999"
+        res = v.verify(text, kb_text=kb)
+        assert not res.is_grounded, "Несуществующая улица должна флажиться"
+
+
+class TestTimeAutoFix:
+    """PR #26: time auto-fix не должен оставлять «с уточните на evroopt.by/shops»
+    в середине предложения (получается грамматический мусор)."""
+
+    def test_canonical_hours_8_to_23_passes(self):
+        """Каноническое 8:00–23:00 — safe-fact, не флажится."""
+        v = GroundingVerifier(auto_fix=True)
+        text = "Типовой режим работы гипермаркетов «Евроопт» — с 8:00 до 23:00."
+        res = v.verify(text, kb_text="")
+        assert res.is_grounded, f"8:00-23:00 — каноническое время. Issues: {res.issues}"
+        assert "8:00" in res.cleaned_text
+
+    def test_unsupported_time_removes_sentence(self):
+        """Время не из source — удалить предложение целиком, не подставлять placeholder."""
+        v = GroundingVerifier(auto_fix=True)
+        text = "Магазин работает с 9:00 до 21:00."
+        res = v.verify(text, kb_text="")
+        # Не должно остаться «с уточните на evroopt.by/shops» — это грамматический мусор
+        assert "с уточните" not in res.cleaned_text
+        assert "9:00" not in res.cleaned_text or "evroopt.by/shops" in res.cleaned_text
+
+    def test_unsupported_time_adds_redirect_when_sentence_removed(self):
+        """После удаления предложения добавляется редирект на shops."""
+        v = GroundingVerifier(auto_fix=True)
+        text = "Типовой режим работы гипермаркетов — с 9:00 до 21:00."
+        res = v.verify(text, kb_text="")
+        assert "evroopt.by/shops" in res.cleaned_text
