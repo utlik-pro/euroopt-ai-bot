@@ -96,3 +96,93 @@ def test_no_concrete_facts_passes():
         web_text="",
     )
     assert res.is_grounded is True
+
+
+# ===== Адреса (30.04 — фикс галлюцинации «дом 74-98», «корп. 3, пом. 7Н») =====
+
+
+class TestAddressGrounding:
+    """Bug-find 30.04: бот выдумывал «дом 74-98», «корп. 3, пом. 7Н», «пом. 160,161,162»
+    при наличии в RAG только «Минск, пр-т Независимости, 91» / «52» / «48» и т.д.
+    """
+
+    def test_address_range_always_flagged(self):
+        """Диапазон «дом 74-98» — всегда галлюцинация (одного дома быть в диапазоне не может)."""
+        v = _v()
+        res = v.verify(
+            "Минск, пр-т Независимости, дом 74-98",
+            kb_text="Минск, пр-т Независимости, 74\nМинск, пр-т Независимости, 91",
+            web_text="",
+        )
+        assert res.is_grounded is False
+        assert any(i.kind == "address_range" for i in res.issues)
+
+    def test_address_range_in_short_form(self):
+        """Сокращенная запись «, 74-98» тоже ловится."""
+        v = _v()
+        res = v.verify(
+            "Адрес: Минск, пр-т Независимости, 74-98",
+            kb_text="пр-т Независимости, 74",
+            web_text="",
+        )
+        assert res.is_grounded is False
+        assert any(i.kind == "address_range" for i in res.issues)
+
+    def test_address_with_made_up_pomesheniye_flagged(self):
+        """«пом. 7Н» дописанный к реальному «168-3/3» — галлюцинация."""
+        v = _v()
+        res = v.verify(
+            "Минск, пр-т Независимости, 168, корп. 3, пом. 7Н",
+            kb_text="Минск, пр-т Независимости, 168-3/3",
+            web_text="",
+        )
+        assert res.is_grounded is False
+        assert any(i.kind == "address" for i in res.issues)
+
+    def test_real_address_passes(self):
+        """Адрес дословно из RAG — допустим."""
+        v = _v()
+        res = v.verify(
+            "Магазин по адресу Минск, пр-т Независимости, 48.",
+            kb_text="Магазин Евроопт. Полный адрес: Минск, пр-т Независимости, 48.",
+            web_text="",
+        )
+        # Может быть некритичный шум от других regex'ов, но address не должен быть в issues
+        assert all(
+            i.kind not in ("address", "address_range") for i in res.issues
+        ), f"Реальный адрес ошибочно помечен: {[(i.kind, i.value) for i in res.issues]}"
+
+    def test_real_address_with_slash_passes(self):
+        """Адрес с «/» («23/1», «168-3/3») — это формат записи, не диапазон."""
+        v = _v()
+        res = v.verify(
+            "Минск, пр-т Независимости, 23/1.",
+            kb_text="Полный адрес: Минск, пр-т Независимости, 23/1",
+            web_text="",
+        )
+        assert all(
+            i.kind not in ("address", "address_range") for i in res.issues
+        ), f"Адрес с / ошибочно помечен: {[(i.kind, i.value) for i in res.issues]}"
+
+    def test_address_with_letter_passes(self):
+        """Адрес с буквой («10А», «90Б») — не диапазон."""
+        v = _v()
+        res = v.verify(
+            "Адрес: Минск, ул. Ленина, 10А.",
+            kb_text="Полный адрес: Минск, ул. Ленина, 10А",
+            web_text="",
+        )
+        assert all(
+            i.kind not in ("address", "address_range") for i in res.issues
+        )
+
+    def test_made_up_address_not_in_kb_flagged(self):
+        """Адрес которого нет в kb — флагируется (даже если в реальной жизни существует)."""
+        v = _v()
+        res = v.verify(
+            "Минск, ул. Несуществующая, 99",
+            kb_text="Минск, ул. Ленина, 1\nМинск, пр-т Независимости, 48",
+            web_text="",
+        )
+        assert res.is_grounded is False
+        assert any(i.kind == "address" for i in res.issues)
