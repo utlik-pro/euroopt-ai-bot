@@ -186,3 +186,68 @@ class TestAddressGrounding:
         )
         assert res.is_grounded is False
         assert any(i.kind == "address" for i in res.issues)
+
+
+# ===== Auto-fix адресов (01.05 — после bug на проде) =====
+
+
+class TestAddressAutoFix:
+    """Когда auto_fix=True, грязные адреса должны вырезаться из ответа.
+
+    Bug на проде 01.05: бот отвечал на «Есть ли Евроопт на пр-те Независимости?»:
+        «1. Минск, пр-т Независимости, 74-98
+         2. Минск, пр-т Независимости, 91-4Н
+         3. ...»
+    Адреса в RAG были «48», «74», «91» (без «-98», без «-4Н»). Detection ловил,
+    но без auto_fix ответ всё равно уходил пользователю.
+    """
+
+    def test_auto_fix_removes_range_address_line(self):
+        v = GroundingVerifier(auto_fix=True)
+        text = (
+            "Вот адреса:\n"
+            "1. Минск, пр-т Независимости, 74-98\n"
+            "2. Минск, пр-т Независимости, 91\n"
+            "3. Минск, пр-т Независимости, 48"
+        )
+        kb = "Минск, пр-т Независимости, 91\nМинск, пр-т Независимости, 48"
+        res = v.verify(text, kb_text=kb)
+        # Диапазон должен быть вырезан
+        assert "74-98" not in res.cleaned_text, (
+            f"Диапазон не убран:\n{res.cleaned_text}"
+        )
+        # Реальные адреса остаются
+        assert "91" in res.cleaned_text
+        assert "48" in res.cleaned_text
+
+    def test_auto_fix_removes_made_up_pomesheniye(self):
+        v = GroundingVerifier(auto_fix=True)
+        text = (
+            "Адреса:\n"
+            "1. Минск, пр-т Независимости, 168, корп. 3, пом. 7Н\n"
+            "2. Минск, пр-т Независимости, 91"
+        )
+        kb = "Минск, пр-т Независимости, 168-3/3\nМинск, пр-т Независимости, 91"
+        res = v.verify(text, kb_text=kb)
+        # «корп. 3, пом. 7Н» — выдуманное, должно уйти
+        assert "пом. 7Н" not in res.cleaned_text
+
+    def test_auto_fix_keeps_real_addresses_untouched(self):
+        v = GroundingVerifier(auto_fix=True)
+        text = "Магазин в Минске: пр-т Независимости, 48"
+        kb = "Полный адрес: Минск, пр-т Независимости, 48"
+        res = v.verify(text, kb_text=kb)
+        assert res.cleaned_text == text  # ничего не меняли
+
+    def test_auto_fix_short_list_replaced_with_redirect(self):
+        """Если после удаления галлюцинаций остался <2 пунктов — добавить редирект."""
+        v = GroundingVerifier(auto_fix=True)
+        text = (
+            "Адреса:\n"
+            "1. Минск, пр-т Независимости, 74-98\n"
+            "2. Минск, пр-т Независимости, 91-4Н"
+        )
+        kb = "Минск, пр-т Независимости, 91"  # только один реальный
+        res = v.verify(text, kb_text=kb)
+        # Оба удалены (галлюцинации). Бот должен дать редирект.
+        assert "evroopt.by/shops" in res.cleaned_text

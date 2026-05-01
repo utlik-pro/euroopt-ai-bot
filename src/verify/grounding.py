@@ -77,9 +77,56 @@ ADDRESS_DETAIL_MARKERS = re.compile(
 class VerifyIssue:
     """Найденная подозрительная конкретика."""
 
-    kind: str  # phone | percent | price | time
+    kind: str  # phone | percent | price | time | address | address_range
     value: str
     context_snippet: str  # 30 символов вокруг для логов
+
+
+def _remove_address_lines(text: str, issues: list["VerifyIssue"]) -> str:
+    """Удалить из ответа целые строки/пункты списка с галлюцинированными адресами.
+
+    Стратегия: для каждого issue ищем строку (`\\n`-line) содержащую значение,
+    и убираем её целиком. Если в результате остаётся «обвисший» список из <2 пунктов
+    или ни одного пункта — заменяем хвост на безопасный редирект.
+
+    Также убираем «пункты списка» вида «1. Минск, пр-т ...» где в самой строке
+    есть значение issue. Это типичный формат ответа бота на «адреса магазинов».
+    """
+    if not issues:
+        return text
+    lines = text.splitlines()
+    bad_values = {i.value for i in issues}
+
+    # Проходим, выбрасывая строки содержащие любое из плохих значений
+    kept: list[str] = []
+    removed_count = 0
+    for ln in lines:
+        if any(bv in ln for bv in bad_values):
+            removed_count += 1
+            continue
+        kept.append(ln)
+
+    cleaned = "\n".join(kept)
+
+    # Если после удаления список почти пустой — добавляем редирект
+    # Признак списка: в исходнике были строки с маркерами «1.», «2.», «-», «•»
+    had_list = any(
+        re.match(r"^\s*(\d+\.|[-•])\s+", l) for l in lines
+    )
+    if had_list and removed_count > 0:
+        # Считаем, сколько пунктов осталось
+        remaining_items = sum(1 for l in kept if re.match(r"^\s*(\d+\.|[-•])\s+", l))
+        if remaining_items < 2:
+            # Не оставляем неполный список — заменяем хвост на редирект
+            cleaned = cleaned.rstrip()
+            redirect = (
+                "\n\nПолный список магазинов с актуальными адресами и режимом работы — "
+                "на [evroopt.by/shops](https://evroopt.by/shops/) с фильтром по городу/улице."
+            )
+            if redirect.strip() not in cleaned:
+                cleaned += redirect
+
+    return cleaned
 
 
 @dataclass
@@ -202,7 +249,15 @@ class GroundingVerifier:
 
         cleaned = response_text
         if unsupported and self.auto_fix:
+            # Адреса убираем целым "пунктом списка" (со строкой, маркером и переносом),
+            # т.к. диапазоны/выдуманные «корп.7Н» не имеют корректной замены.
+            address_issues = [i for i in unsupported if i.kind in ("address", "address_range")]
+            if address_issues:
+                cleaned = _remove_address_lines(cleaned, address_issues)
+
             for issue in unsupported:
+                if issue.kind in ("address", "address_range"):
+                    continue  # уже обработано выше через _remove_address_lines
                 if issue.kind == "phone":
                     repl = "+375 44 788 88 80"
                 elif issue.kind == "time":
