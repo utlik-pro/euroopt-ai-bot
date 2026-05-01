@@ -260,6 +260,56 @@ def load_promotions_hit():
 
 # ============ Удача в придачу ============
 
+
+def load_udacha_current_tur():
+    """Текущий тур (парсер главной igra.evroopt.by, обновляется по cron).
+
+    01.05 — после теста заказчика бот выдавал тур 214 на запрос про 215.
+    Теперь тянем актуальный тур из data/udacha/current.json (парсится каждый час).
+    """
+    fp = DATA / "udacha/current.json"
+    if not fp.exists():
+        return 0
+    try:
+        data = json.load(open(fp, encoding="utf-8"))
+    except Exception:
+        return 0
+    if not data.get("tur_number"):
+        return 0
+    tur = data["tur_number"]
+    prizes_summary = data.get("prizes_summary") or ""
+    prizes_list = data.get("prizes_list") or []
+    period = data.get("period") or ""
+    draw_date = data.get("draw_date") or ""
+    rules_url = data.get("rules_url") or "https://igra.evroopt.by/"
+
+    text = (
+        f"«Удача в придачу!» — ТЕКУЩИЙ ТУР {tur}\n\n"
+        f"Сейчас идёт тур {tur} рекламной игры «Удача в придачу!» сети «Евроторг».\n"
+    )
+    if period:
+        text += f"Период покупок: {period}.\n"
+    if draw_date:
+        text += f"Розыгрыш суперпризов: {draw_date}.\n"
+    if prizes_summary:
+        text += f"\n{prizes_summary}\n"
+    if prizes_list:
+        text += "\nПризы тура (по данным главной страницы):\n"
+        for p in prizes_list[:8]:
+            text += f"- {p}\n"
+    text += (
+        f"\nПравила игры (PDF): {rules_url}\n"
+        f"Сайт игры: https://igra.evroopt.by/\n\n"
+        f"ВАЖНО: денежная часть некоторых призов идёт на уплату подоходного "
+        f"налога с приза и не выдаётся клиенту наличными — это публичное условие игры.\n\n"
+        f"Ключевые слова: Удача в придачу, УВП, текущий тур, "
+        f"тур {tur}, последний тур, актуальный тур, призы тура, "
+        f"когда розыгрыш, что разыгрывается, главные призы, новый тур"
+    )
+    add("udacha_current_tur", text, "udacha", source="igra.evroopt.by", tur=str(tur))
+    return 1
+
+
 def load_udacha():
     fp = DATA / "udacha/igra.evroopt УВП.xlsx"
     wb = openpyxl.load_workbook(fp)
@@ -581,6 +631,7 @@ def main():
         "Brand links (evroopt/groshyk/hitdiscount)": load_brand_links(),
         "🆕 Акции Евроопт (Красная цена, Цены вниз, Бонусы, Грильфест)": load_promotions_evroopt(),
         "🆕 Акции Хит Дискаунтер": load_promotions_hit(),
+        "🆕 Удача в придачу — текущий тур (cron-парсер главной)": load_udacha_current_tur(),
         "🆕 Удача в придачу (FAQ + товары удачи)": load_udacha(),
         "🆕 Магазины с брендом (Евроопт/Хит)": load_stores_with_brand(),
         "🆕🆕 v2: 1040 магазинов с brand/format/city": load_all_stores_v2(),
