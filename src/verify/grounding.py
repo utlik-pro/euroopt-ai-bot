@@ -28,6 +28,13 @@ SAFE_FACTS = {
     "currency_amounts": frozenset(["99 копеек", "2 копейки", "1 копейка"]),
     "expiration": frozenset(["365 дней"]),
     "store_count": frozenset(["1000", "более 1000"]),
+    # Типовой режим гипермаркетов «Евроопт» из SYSTEM_PROMPT — каноническая константа.
+    # Без этого verifier режет ответ даже когда LLM выдаёт правильный диапазон.
+    "hours": frozenset([
+        "8:00-23:00", "8:00–23:00", "08:00-23:00", "08:00–23:00",
+        "8:00 до 23:00", "08:00 до 23:00",
+        "с 8:00 до 23:00", "с 08:00 до 23:00",
+    ]),
 }
 
 # Регулярки для извлечения конкретики из ответа
@@ -80,6 +87,27 @@ class VerifyIssue:
     kind: str  # phone | percent | price | time | address | address_range
     value: str
     context_snippet: str  # 30 символов вокруг для логов
+
+
+def _remove_sentence_with(text: str, value: str) -> str:
+    """Удалить из ответа предложение(я), где встречается `value`.
+
+    Работает по разделителям `.!?` (русские предложения). Полезно для
+    time auto-fix: вместо вставки «уточните на evroopt.by/shops» в середину
+    предложения, выкидываем всё это предложение целиком и оставляем редирект
+    в конце.
+    """
+    if not value or value not in text:
+        return text
+    # Бьём по концам предложений, оставляя разделители
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    kept = [p for p in parts if value not in p]
+    cleaned = " ".join(kept).rstrip()
+    # Если что-то удалили и в результате нет упоминания shops/evroopt — добавим редирект
+    if len(kept) < len(parts):
+        if "evroopt.by/shops" not in cleaned and "evroopt.by" not in cleaned:
+            cleaned += "\n\nРежим работы конкретного магазина уточните на [evroopt.by/shops](https://evroopt.by/shops/)."
+    return cleaned
 
 
 def _remove_address_lines(text: str, issues: list["VerifyIssue"]) -> str:
@@ -169,6 +197,47 @@ class GroundingVerifier:
         s = self._normalize_for_match(sources)
         return v in s
 
+    @staticmethod
+    def _is_address_in_sources(addr: str, sources: str) -> bool:
+        """Fuzzy-проверка адреса: расщепляем на «улица + дом» и ищем оба в RAG.
+
+        Зачем: точная нормализация ломается на разной форматировке инициалов
+        («ул. Шаранговича В.Ф., 48» vs «ул. Шаранговича, 48»). Здесь смотрим
+        упоминание имени улицы и номера дома **в радиусе 120 символов** друг
+        от друга в источнике.
+        """
+        if not addr or not sources:
+            return False
+        # 1) номер дома (последовательность цифр + опц. буква)
+        house_m = re.search(r"\b(\d{1,4}[а-яёА-ЯЁa-z]?)\b(?!\s*[-–])", addr)
+        if not house_m:
+            return False
+        house = house_m.group(1)
+        # 2) ключевое слово улицы (первое слово ≥4 букв после маркера улицы)
+        street_m = re.search(
+            r"(?:ул\.?|улиц[аы]|пр-?т[еауы]?\.?|проспект[ауе]?|пер\.|"
+            r"переул(?:ок|ка)|бул\.?|бульвар|б-р[еауы]?\.?|ш\.|шоссе|"
+            r"наб\.?|пл\.?|площад[ьи]|мкр(?:-н)?|микрорайон|тракт)"
+            r"[\s.]+([А-ЯЁа-яё]{4,})",
+            addr, re.IGNORECASE,
+        )
+        if not street_m:
+            return False
+        street = street_m.group(1).lower()
+        # Корень слова — обрежем последние 2 символа (падежи: «Шаранговича» / «Шаранговичу»)
+        street_root = street[:-2] if len(street) > 6 else street
+        # Ищем все вхождения этого корня в источнике, проверяем что в радиусе 120
+        # от него стоит наш номер дома.
+        s_lower = sources.lower()
+        for sm in re.finditer(re.escape(street_root), s_lower):
+            window_start = max(0, sm.start() - 30)
+            window_end = min(len(s_lower), sm.end() + 120)
+            window = s_lower[window_start:window_end]
+            # ищем «48» как отдельное число в окне
+            if re.search(rf"\b{re.escape(house.lower())}\b", window):
+                return True
+        return False
+
     def _is_safe(self, kind: str, value: str) -> bool:
         v_norm = self._normalize_for_match(value)
         for safe_kind, items in SAFE_FACTS.items():
@@ -245,6 +314,13 @@ class GroundingVerifier:
                 continue
             if self._is_in_sources(issue.value, sources):
                 continue
+            # Адрес — пробуем fuzzy match по корню улицы + номеру дома,
+            # но только если в самом адресе НЕТ детальных маркеров «корп.»/«пом.»/«кв.»/«офис»
+            # (для них требуем строгое вхождение — иначе пропустим галлюцинации
+            # «корп. 3, пом. 7Н» к реальной улице).
+            if issue.kind == "address" and not ADDRESS_DETAIL_MARKERS.search(issue.value):
+                if self._is_address_in_sources(issue.value, sources):
+                    continue
             unsupported.append(issue)
 
         cleaned = response_text
@@ -259,15 +335,15 @@ class GroundingVerifier:
                 if issue.kind in ("address", "address_range"):
                     continue  # уже обработано выше через _remove_address_lines
                 if issue.kind == "phone":
-                    repl = "+375 44 788 88 80"
+                    cleaned = cleaned.replace(issue.value, "+375 44 788 88 80")
                 elif issue.kind == "time":
-                    repl = "уточните на evroopt.by/shops"
+                    # Не подставляем placeholder в середину предложения
+                    # (получалось «работы — с уточните на evroopt.by/shops»),
+                    # а удаляем всё предложение с этим временем целиком.
+                    cleaned = _remove_sentence_with(cleaned, issue.value)
                 elif issue.kind == "percent":
                     # Процент без подтверждения — оставляем, но логируем
                     continue
-                else:
-                    continue
-                cleaned = cleaned.replace(issue.value, repl)
 
         if unsupported:
             logger.warning(
