@@ -19,6 +19,8 @@
 Переключение между моделями — через .env (LLM_PROVIDER + LLM_MODEL).
 """
 
+import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -27,6 +29,33 @@ from openai import AsyncOpenAI
 import httpx
 
 from src.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+# Reasoning-модели: thinking-режим включён по умолчанию.
+# Без extra_body={"thinking":{"type":"disabled"}} message.content приходит пустой.
+_REASONING_MODELS_PREFIXES = (
+    "glm-4.7-flashx",
+    "glm-4.7-flash",
+    "glm-4.6v",
+    "glm-5",
+    "deepseek-reasoner",
+    "o1-",
+    "o3-",
+)
+
+
+def _is_reasoning_model(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    return any(name.startswith(p) for p in _REASONING_MODELS_PREFIXES)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    if "overloaded" in s or "rate limit" in s or "service unavailable" in s:
+        return True
+    return any(code in s for code in ("1305", "1304", "503", "429"))
 
 
 def _get_http_client() -> httpx.AsyncClient:
@@ -200,15 +229,44 @@ class OpenAICompatibleProvider(LLMProvider):
         )
         if overrides is not None and overrides.seed is not None:
             kwargs["seed"] = overrides.seed
-        response = await self.client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
-        usage = response.usage
-        return LLMResponse(
-            text=choice.message.content,
-            model=response.model,
-            input_tokens=usage.prompt_tokens if usage else 0,
-            output_tokens=usage.completion_tokens if usage else 0,
-        )
+
+        # Reasoning-модели (glm-4.7-flashx и др.): отключаем thinking,
+        # иначе message.content пустой.
+        if _is_reasoning_model(model):
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+        # Retry с экспоненциальным backoff для transient-ошибок
+        # (1305 overloaded на бесплатных tier'ах z.ai, 429 rate limit и т.д.)
+        max_retries = 3
+        backoff = 1.0
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.chat.completions.create(**kwargs)
+                choice = response.choices[0]
+                usage = response.usage
+                content = choice.message.content or ""
+                if not content.strip():
+                    raise RuntimeError(
+                        f"Empty content from {model} (finish={choice.finish_reason})"
+                    )
+                return LLMResponse(
+                    text=content,
+                    model=response.model,
+                    input_tokens=usage.prompt_tokens if usage else 0,
+                    output_tokens=usage.completion_tokens if usage else 0,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt == max_retries - 1 or not _is_retryable_error(exc):
+                    raise
+                logger.warning(
+                    "llm_retry attempt=%d/%d model=%s exc=%s",
+                    attempt + 1, max_retries, model, str(exc)[:120],
+                )
+                await asyncio.sleep(backoff)
+                backoff *= 2
+        raise last_exc or RuntimeError("LLM call failed after retries")
 
 
 class DeepSeekProvider(OpenAICompatibleProvider):
@@ -228,21 +286,22 @@ class DeepSeekProvider(OpenAICompatibleProvider):
 
 
 class GLMProvider(OpenAICompatibleProvider):
-    """Zhipu AI: glm-4.7-flash (БЕСПЛАТНАЯ!), glm-4.7, glm-4.6v и др.
+    """Zhipu AI: glm-4.7-flashx ($0.07/$0.40, cache $0.01) — наш default.
 
-    Китайский провайдер — работает из РБ напрямую, без прокси.
-    Самые дешёвые модели. Без санкционных рисков (КНР).
+    Китайский провайдер, работает из РБ напрямую (без прокси).
+    Default — glm-4.7-flashx (платная Flash-X, стабильная).
+    Бесплатная glm-4.7-flash часто возвращает 1305 overloaded → не для прода.
 
     Base URL настраивается через GLM_BASE_URL:
-      - https://open.bigmodel.cn/api/paas/v4 — прямо в КНР (default)
-      - https://api.z.ai/api/paas/v4         — международный домен (быстрее из EU/РБ)
+      - https://open.bigmodel.cn/api/paas/v4  (default, КНР)
+      - https://api.z.ai/api/paas/v4          (intl, быстрее из EU/РБ)
     """
 
     def __init__(self):
         super().__init__(
             api_key=settings.glm_api_key,
             base_url=settings.glm_base_url,
-            default_model="glm-4.7-flash",  # default обновлён на свежую и БЕСПЛАТНУЮ модель
+            default_model="glm-4.7-flashx",
             needs_proxy=False,
         )
 
