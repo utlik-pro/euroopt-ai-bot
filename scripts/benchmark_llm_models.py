@@ -37,25 +37,34 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 SCENARIOS_FP = ROOT / "tests/scenarios/tester_scenarios.json"
 
-# Приблизительные цены на 01.05.2026 ($/1M токенов).
-# Обновлять при новой ценовой политике.
+# Цены на 02.05.2026 ($/1M токенов). Обновлены после релизов GPT-5 nano,
+# Gemini 3.1 Flash Lite, DeepSeek V3.2, GLM-4.7-Flash.
 PRICING = {
-    # OpenAI
-    "gpt-4o-mini":       {"in": 0.15, "out": 0.60, "provider": "openai"},
+    # OpenAI — 02.05.2026
+    "gpt-5-nano":        {"in": 0.05, "out": 0.40, "provider": "openai"},   # 🥇 топ цена/качество
+    "gpt-4.1-nano":      {"in": 0.10, "out": 0.40, "provider": "openai"},
+    "gpt-4o-mini":       {"in": 0.15, "out": 0.60, "provider": "openai"},   # baseline
     "gpt-4o":            {"in": 2.50, "out": 10.00, "provider": "openai"},
-    # DeepSeek
-    "deepseek-chat":     {"in": 0.27, "out": 1.10, "provider": "deepseek"},
-    "deepseek-reasoner": {"in": 0.55, "out": 2.19, "provider": "deepseek"},
-    # GLM (Zhipu / z.ai)
-    "glm-4-flash":       {"in": 0.10, "out": 0.30, "provider": "glm"},
-    "glm-4-plus":        {"in": 0.65, "out": 1.30, "provider": "glm"},
-    # Claude
-    "claude-3-5-haiku":  {"in": 0.80, "out": 4.00, "provider": "claude"},
-    # Mistral
+    # DeepSeek (КНР) — 02.05.2026 (V3.2 заменил V3)
+    "deepseek-chat":     {"in": 0.28, "out": 0.42, "provider": "deepseek"}, # V3.2
+    "deepseek-reasoner": {"in": 0.28, "out": 0.42, "provider": "deepseek"}, # V3.2 reasoning
+    # Gemini (Google) — 02.05.2026
+    "gemini-3.1-flash-lite": {"in": 0.10, "out": 0.40, "provider": "gemini"},  # 🥈 EU
+    "gemini-2.5-flash":      {"in": 0.15, "out": 0.60, "provider": "gemini"},
+    "gemini-3-flash":        {"in": 0.50, "out": 3.00, "provider": "gemini"},
+    # GLM (Zhipu / z.ai) — 02.05.2026 (КНР)
+    "glm-4.7-flash":     {"in": 0.00, "out": 0.00, "provider": "glm"},      # БЕСПЛАТНАЯ с лимитами
+    "glm-4.6v":          {"in": 0.14, "out": 0.42, "provider": "glm"},
+    "glm-4.7":           {"in": 0.60, "out": 2.20, "provider": "glm"},
+    # Claude (для контроля качества)
+    "claude-haiku-3.5":  {"in": 0.80, "out": 4.00, "provider": "claude"},
+    # Mistral (EU)
+    "mistral-nemo":      {"in": 0.02, "out": 0.03, "provider": "mistral"},  # ультра-дешёвая, 12B
     "mistral-small":     {"in": 0.20, "out": 0.60, "provider": "mistral"},
-    # Qwen
+    # Qwen (Alibaba, КНР)
     "qwen2.5-72b":       {"in": 0.40, "out": 1.20, "provider": "qwen"},
-    # Yandex
+    "qwen3-72b":         {"in": 0.40, "out": 1.20, "provider": "qwen"},
+    # Yandex (РФ/РБ контур)
     "yandexgpt-lite":    {"in": 0.50, "out": 1.00, "provider": "yandexgpt"},
     "yandexgpt-pro":     {"in": 1.20, "out": 1.20, "provider": "yandexgpt"},
 }
