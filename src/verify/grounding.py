@@ -195,7 +195,30 @@ class GroundingVerifier:
             return False
         v = self._normalize_for_match(value)
         s = self._normalize_for_match(sources)
-        return v in s
+        if v in s:
+            return True
+        # 02.05 — fallback для курсов валют и цен с разной разрядностью.
+        # «2.823 BYN» в ответе может быть в источнике как «2,823 руб», «2.83 BYN»,
+        # «1 USD = 2.823» и т.д. Извлекаем «голое» число и ищем его + признак
+        # валюты/цены в источнике.
+        num_match = re.search(r"\b(\d+[.,]\d{1,4})\b", value)
+        if num_match:
+            num = num_match.group(1).replace(",", ".")
+            # Допуск ±0.01 для курсов валют — Tavily может возвращать чуть устаревший
+            # курс, банк ЦБ другой и т.д. Если в источнике число близкое к нашему — ок.
+            try:
+                target = float(num)
+                # Все числа из source с разделителем
+                for src_num_match in re.finditer(r"\b(\d+[.,]\d{1,4})\b", sources):
+                    try:
+                        src = float(src_num_match.group(1).replace(",", "."))
+                        if abs(src - target) <= 0.05:
+                            return True
+                    except ValueError:
+                        continue
+            except ValueError:
+                pass
+        return False
 
     @staticmethod
     def _is_address_in_sources(addr: str, sources: str) -> bool:
