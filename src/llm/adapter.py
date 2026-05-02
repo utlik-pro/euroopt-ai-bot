@@ -354,6 +354,48 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         )
 
 
+class XAIProvider(OpenAICompatibleProvider):
+    """xAI Grok — серверы в US, прямой доступ из РБ (без relay).
+
+    Модели:
+    - grok-4-1-fast-non-reasoning (default): $0.20/$0.50/1M, 2M контекст,
+      0 reasoning tokens — оптимально для прода Евроторга
+    - grok-4-1-fast-reasoning: тот же $0.20/$0.50/1M, но 200+ reasoning_tokens
+      (для нашей задачи лишняя переплата)
+    - grok-3, grok-3-mini, grok-4-0709, grok-4.20-*
+
+    Cache hit 75% off на повторяющиеся промпты.
+    """
+
+    def __init__(self):
+        super().__init__(
+            api_key=settings.xai_api_key,
+            base_url="https://api.x.ai/v1",
+            default_model="grok-4-1-fast-non-reasoning",
+            needs_proxy=False,
+        )
+
+
+class GroqProvider(OpenAICompatibleProvider):
+    """Groq LPU — экстремальная скорость (500-1000 ток/с).
+
+    US-серверы, прямой доступ из РБ.
+    Модели: openai/gpt-oss-20b (default, $0.075/$0.30/1M, 1000 TPS),
+    openai/gpt-oss-120b ($0.15/$0.60/1M), llama-3.x, qwen3-32b.
+
+    ВНИМАНИЕ: free tier 8K TPM не выдержит наш SYSTEM_PROMPT (~14K).
+    Для прода нужен Developer Plan.
+    """
+
+    def __init__(self):
+        super().__init__(
+            api_key=settings.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+            default_model="openai/gpt-oss-20b",
+            needs_proxy=False,
+        )
+
+
 class AtlasCloudProvider(OpenAICompatibleProvider):
     """Atlas Cloud — агрегатор 300+ моделей, OpenAI-совместимый API.
 
@@ -512,6 +554,8 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,        # GPT-4o-mini
     "openrouter": OpenRouterProvider, # Все модели через один ключ
     "atlas": AtlasCloudProvider,     # Atlas Cloud — 300+ моделей, SLA 99.9%
+    "xai": XAIProvider,              # xAI Grok 4.1 Fast (US, без санкций, 2M ctx)
+    "groq": GroqProvider,            # Groq LPU — gpt-oss, llama (500-1000 TPS)
     # Дополнительные (обсуждались на встрече)
     "qwen": QwenProvider,            # Qwen 2.5 (on-premise кандидат)
     "yandexgpt": YandexGPTProvider,  # YandexGPT
@@ -521,7 +565,7 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
 
 # Порядок фоллбэка: если основной провайдер недоступен, пробуем следующий.
 # Приоритет: несанкционные (работают из РБ без прокси) → санкционные (нужен прокси).
-_FALLBACK_ORDER = ["atlas", "openrouter", "deepseek", "glm", "qwen", "gemini", "openai", "anthropic", "yandexgpt", "gigachat"]
+_FALLBACK_ORDER = ["xai", "groq", "atlas", "openrouter", "deepseek", "glm", "qwen", "gemini", "openai", "anthropic", "yandexgpt", "gigachat"]
 
 
 def get_llm_provider(provider_name: str | None = None) -> LLMProvider:
@@ -562,6 +606,8 @@ def get_llm_provider_with_fallback(provider_name: str | None = None) -> LLMProvi
                 # Проверяем что API ключ заполнен
                 key_map = {
                     "atlas": settings.atlas_api_key,
+                    "xai": settings.xai_api_key,
+                    "groq": settings.groq_api_key,
                     "openrouter": settings.openrouter_api_key,
                     "deepseek": settings.deepseek_api_key,
                     "glm": settings.glm_api_key,

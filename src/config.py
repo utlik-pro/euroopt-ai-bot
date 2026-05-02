@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     yandexgpt_api_key: str = Field(default="", env="YANDEXGPT_API_KEY")
     yandexgpt_folder_id: str = Field(default="", env="YANDEXGPT_FOLDER_ID")
     gigachat_auth_key: str = Field(default="", env="GIGACHAT_AUTH_KEY")
+    # xAI Grok 4.1 Fast — US-серверы, прямой доступ из РБ (без relay).
+    # 2M контекст, $0.20/$0.50 за 1M, ~2с latency, лучшее следование промпту.
+    xai_api_key: str = Field(default="", env="XAI_API_KEY")
+    # Groq LPU — экстремальная скорость (500-1000 ток/с), open-source модели.
+    # Free tier 8K TPM; для прода нужен Developer Plan.
+    groq_api_key: str = Field(default="", env="GROQ_API_KEY")
 
     # API-релей (для санкционных API из РБ)
     # URL релей-сервиса на Render/Railway (например: https://euroopt-llm-relay.onrender.com)
