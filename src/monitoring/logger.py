@@ -85,6 +85,13 @@ class InteractionLogger:
         with open(filepath, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(log), ensure_ascii=False) + "\n")
 
+        # Bot response preview в stdout-логах (для отладки через render logs).
+        # Берём первые 400 символов, экранируем переводы строк, маскируем
+        # любые случайные ПДн (`mask_pii` уже отработал на входе и выходе).
+        # Это нужно чтобы видеть реальные ответы тестерам прямо в render logs,
+        # без захода в persistent disk через Shell.
+        preview = (log.bot_response or "").replace("\n", " ").strip()[:400]
+
         logger.info(
             "request_logged",
             user_id=log.user_id,
@@ -93,6 +100,7 @@ class InteractionLogger:
             cost_byn=f"{log.cost_byn:.6f}",
             response_time_ms=log.response_time_ms,
             filtered=log.content_filtered,
+            response_preview=preview,
         )
 
     def _calc_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
