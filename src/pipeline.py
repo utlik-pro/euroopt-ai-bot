@@ -10,7 +10,8 @@ from src.llm.adapter import (
     GenerationOverrides,
     LLMResponse,
 )
-from src.llm.prompts import SYSTEM_PROMPT
+from src.config import settings
+from src.llm.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from src.rag.engine import RAGEngine
 from src.promotions.engine import PromotionEngine
 from src.chat_history import ChatHistory
@@ -485,7 +486,15 @@ class Pipeline:
         promos_text = self.promotions.format_promotions(relevant_promos)
 
         # Layer 3: LLM generation with history
-        system = SYSTEM_PROMPT.format(context=context, promotions=promos_text)
+        # Переключатель промпта: USE_LITE_PROMPT=true ИЛИ LLM_PROVIDER=groq → SYSTEM_PROMPT_LITE
+        # (Groq free tier 8K TPM не выдержит полный промпт ~10K токенов).
+        # Откат: убрать env-переменную или сменить LLM_PROVIDER → автоматически вернётся SYSTEM_PROMPT.
+        _use_lite = (
+            os.environ.get("USE_LITE_PROMPT", "").lower() in ("true", "1", "yes")
+            or settings.llm_provider == "groq"
+        )
+        prompt_template = SYSTEM_PROMPT_LITE if _use_lite else SYSTEM_PROMPT
+        system = prompt_template.format(context=context, promotions=promos_text)
 
         # Get chat history for this user
         chat_history = self.history.get(user_id)
