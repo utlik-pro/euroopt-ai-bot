@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", env="ANTHROPIC_API_KEY")
     deepseek_api_key: str = Field(default="", env="DEEPSEEK_API_KEY")
     glm_api_key: str = Field(default="", env="GLM_API_KEY")
+    # GLM base URL: можно переключить между bigmodel.cn (КНР-прямо) и api.z.ai (международный).
+    # api.z.ai обычно быстрее из EU/РБ; bigmodel.cn — прямо в КНР-датацентре.
+    glm_base_url: str = Field(
+        default="https://open.bigmodel.cn/api/paas/v4",
+        env="GLM_BASE_URL",
+    )
     google_api_key: str = Field(default="", env="GOOGLE_API_KEY")
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
     openrouter_api_key: str = Field(default="", env="OPENROUTER_API_KEY")

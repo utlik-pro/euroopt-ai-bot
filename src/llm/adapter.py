@@ -228,18 +228,21 @@ class DeepSeekProvider(OpenAICompatibleProvider):
 
 
 class GLMProvider(OpenAICompatibleProvider):
-    """Zhipu AI GLM-4-Flash (< 0,01 коп.) и GLM-4 (0,07 коп./запрос).
+    """Zhipu AI: glm-4.7-flash (БЕСПЛАТНАЯ!), glm-4.7, glm-4.6v и др.
 
     Китайский провайдер — работает из РБ напрямую, без прокси.
-    Самые дешёвые модели. Без санкционных рисков.
-    Модели: glm-4-flash, glm-4-plus, glm-4.
+    Самые дешёвые модели. Без санкционных рисков (КНР).
+
+    Base URL настраивается через GLM_BASE_URL:
+      - https://open.bigmodel.cn/api/paas/v4 — прямо в КНР (default)
+      - https://api.z.ai/api/paas/v4         — международный домен (быстрее из EU/РБ)
     """
 
     def __init__(self):
         super().__init__(
             api_key=settings.glm_api_key,
-            base_url="https://open.bigmodel.cn/api/paas/v4",
-            default_model="glm-4-flash",
+            base_url=settings.glm_base_url,
+            default_model="glm-4.7-flash",  # default обновлён на свежую и БЕСПЛАТНУЮ модель
             needs_proxy=False,
         )
 
